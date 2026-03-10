@@ -1,25 +1,33 @@
 import requests
-import time
-
 import os
-WEBHOOK = os.environ["https://discord.com/api/webhooks/1480873681528815642/hiOVyFgqrvRwF3ys8Nb-pA6ccSC29PhStzQbcFCURJe1Fx4KkEUNPzAFeELVjBj9xuNU"]
+
+WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
 def send(msg):
-    requests.post(WEBHOOK, json={"content": msg})
+    requests.post(WEBHOOK, json={"content": msg}, timeout=20)
 
 def check_tokens():
-    url = "https://api.dexscreener.com/latest/dex/tokens/solana"
-    data = requests.get(url).json()
+    url = "https://api.dexscreener.com/token-profiles/latest/v1"
+    data = requests.get(url, timeout=20).json()
 
-    for pair in data.get("pairs", [])[:20]:
-        liq = pair.get("liquidity", {}).get("usd", 0)
-        mcap = pair.get("fdv", 0)
-        vol = pair.get("volume", {}).get("h24", 0)
-        name = pair.get("baseToken", {}).get("name")
+    for item in data[:20]:
+        chain = (item.get("chainId") or "").lower()
+        if chain != "solana":
+            continue
 
-        if liq > 20000 and vol > 50000 and mcap < 5000000:
-            send(f"🟢 BUY SIGNAL\n{name}\nMCAP {mcap}\nLIQ {liq}\nVOL {vol}")
+        name = item.get("tokenName") or item.get("header") or "Unknown"
+        token_address = item.get("tokenAddress") or "N/A"
 
-while True:
+        send(
+            f"🟡 WATCHLIST\n"
+            f"Token: {name}\n"
+            f"Address: {token_address}\n"
+            f"Reason: New Solana token profile detected\n"
+            f"Action: research deeper"
+        )
+
+def main():
     check_tokens()
-    time.sleep(120)
+
+if __name__ == "__main__":
+    main()
