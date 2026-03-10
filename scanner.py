@@ -12,27 +12,22 @@ DEX_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 
 MAX_ALERTS = 2
 
-# ---------------------
-
 def send(msg):
-    requests.post(WEBHOOK, json={"content": msg})
-
-# ---------------------
+    try:
+        requests.post(WEBHOOK, json={"content": msg}, timeout=10)
+    except:
+        pass
 
 def load_state():
-
     if not STATE_FILE.exists():
         return {"tokens": {}, "last_status": 0}
-
-    return json.loads(STATE_FILE.read_text())
-
-# ---------------------
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except:
+        return {"tokens": {}, "last_status": 0}
 
 def save_state(state):
-
     STATE_FILE.write_text(json.dumps(state, indent=2))
-
-# ---------------------
 
 def classify(liq, mc, vol):
 
@@ -44,7 +39,23 @@ def classify(liq, mc, vol):
 
     return None, None
 
-# ---------------------
+def get_pair(addr):
+
+    try:
+        r = requests.get(
+            f"https://api.dexscreener.com/token-pairs/v1/solana/{addr}",
+            timeout=10
+        )
+
+        pairs = r.json()
+
+        if not pairs:
+            return None
+
+        return pairs[0]
+
+    except:
+        return None
 
 def main():
 
@@ -52,29 +63,27 @@ def main():
 
     alerts = []
 
-    data = requests.get(DEX_URL).json()
+    try:
+        data = requests.get(DEX_URL, timeout=10).json()
+    except:
+        return
 
     for token in data[:20]:
 
         name = token.get("tokenName")
-
         addr = token.get("tokenAddress")
 
-        try:
-
-            pair = requests.get(
-                f"https://api.dexscreener.com/token-pairs/v1/solana/{addr}"
-            ).json()[0]
-
-        except:
-
+        if not addr:
             continue
 
-        liq = pair.get("liquidity", {}).get("usd", 0)
+        pair = get_pair(addr)
 
-        mc = pair.get("marketCap", 0)
+        if not pair:
+            continue
 
-        vol = pair.get("volume", {}).get("h24", 0)
+        liq = pair.get("liquidity", {}).get("usd", 0) or 0
+        mc = pair.get("marketCap", 0) or 0
+        vol = pair.get("volume", {}).get("h24", 0) or 0
 
         signal, action = classify(liq, mc, vol)
 
@@ -103,8 +112,6 @@ Action: {action}
     for m in alerts[:MAX_ALERTS]:
         send(m)
 
-    # ----- hourly status -----
-
     now = int(time.time())
 
     if now - state["last_status"] > 3600:
@@ -115,9 +122,5 @@ Action: {action}
 
     save_state(state)
 
-
-# ---------------------
-
 if __name__ == "__main__":
-
     main()
