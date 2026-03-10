@@ -1,105 +1,104 @@
-import os
 import requests
-import time
 import json
-from pathlib import Path
+import time
 
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+WEBHOOK = "https://discord.com/api/webhooks/1480897492198621396/f6DYvrP3PvzfKSOBiPevVNBbRO4Jp7rxSJGOpteo3D2JGQT4UALxSlygzvH_KF4mbAAW"
 
-STATE_FILE = Path("state.json")
+STATE_FILE = "state.json"
 
-DEX_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEX_API = "https://api.dexscreener.com/latest/dex/pairs/solana"
 
-MAX_ALERTS = 2
-
-def send(msg):
-    try:
-        requests.post(WEBHOOK, json={"content": msg}, timeout=10)
-    except:
-        pass
 
 def load_state():
-    if not STATE_FILE.exists():
-        return {"tokens": {}, "last_status": 0}
     try:
-        return json.loads(STATE_FILE.read_text())
+        with open(STATE_FILE) as f:
+            return json.load(f)
     except:
         return {"tokens": {}, "last_status": 0}
 
+
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def send(msg):
+
+    data = {"content": msg}
+
+    requests.post(WEBHOOK, json=data)
+
 
 def classify(liq, mc, vol):
 
-    if liq > 100000 and vol > 300000 and mc < 3000000:
-        return "🟨 GOLD", "BUY priority"
+    score = 0
 
-    if liq > 30000 and vol > 100000 and mc < 5000000:
-        return "🟢 GREEN", "BUY small"
+    if liq > 30000:
+        score += 1
+    if liq > 60000:
+        score += 1
+    if liq > 100000:
+        score += 1
 
-    return None, None
+    if vol > 100000:
+        score += 1
+    if vol > 250000:
+        score += 1
+    if vol > 500000:
+        score += 1
 
-def get_pair(addr):
+    if mc < 5000000:
+        score += 1
+    if mc < 3000000:
+        score += 1
+    if mc < 1500000:
+        score += 1
 
-    try:
-        r = requests.get(
-            f"https://api.dexscreener.com/token-pairs/v1/solana/{addr}",
-            timeout=10
-        )
+    if score >= 7:
+        return "🟨 GOLD", "BUY priority", score
 
-        pairs = r.json()
+    if score >= 4:
+        return "🟢 GREEN", "BUY small", score
 
-        if not pairs:
-            return None
+    return None, None, score
 
-        return pairs[0]
-
-    except:
-        return None
 
 def main():
 
     state = load_state()
 
-    alerts = []
+    r = requests.get(DEX_API)
 
-    try:
-        data = requests.get(DEX_URL, timeout=10).json()
-    except:
-        return
+    pairs = r.json()["pairs"]
 
-    for token in data[:20]:
+    found = False
 
-        name = token.get("tokenName")
-        addr = token.get("tokenAddress")
+    for p in pairs[:30]:
 
-        if not addr:
-            continue
-
-        pair = get_pair(addr)
-
-        if not pair:
-            continue
-
-        liq = pair.get("liquidity", {}).get("usd", 0) or 0
-        mc = pair.get("marketCap", 0) or 0
-        vol = pair.get("volume", {}).get("h24", 0) or 0
-
-        signal, action = classify(liq, mc, vol)
-
-        if not signal:
-            continue
+        addr = p["baseToken"]["address"]
 
         if addr in state["tokens"]:
             continue
 
+        name = p["baseToken"].get("name") or p["baseToken"].get("symbol") or "Unknown Token"
+
+        mc = p.get("fdv") or 0
+        liq = p.get("liquidity", {}).get("usd", 0)
+        vol = p.get("volume", {}).get("h24", 0)
+
+        signal, action, score = classify(liq, mc, vol)
+
         state["tokens"][addr] = True
 
-        msg = f"""
+        if signal:
+
+            msg = f"""
 {signal}
 
 Token: {name}
+Address: {addr}
 
+Score: {score}/9
 MC: ${int(mc):,}
 Liq: ${int(liq):,}
 Vol24h: ${int(vol):,}
@@ -107,20 +106,20 @@ Vol24h: ${int(vol):,}
 Action: {action}
 """
 
-        alerts.append(msg)
+            send(msg)
 
-    for m in alerts[:MAX_ALERTS]:
-        send(m)
+            found = True
 
     now = int(time.time())
 
-    if now - state["last_status"] > 3600:
+    if not found and now - state.get("last_status", 0) > 3600:
 
         send("🤖 SCANNER ACTIVE — No signals detected")
 
         state["last_status"] = now
 
     save_state(state)
+
 
 if __name__ == "__main__":
     main()
