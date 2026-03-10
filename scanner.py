@@ -1,7 +1,7 @@
 import os
 import requests
 
-WEBHOOK = os.environ["https://discord.com/api/webhooks/1480897492198621396/f6DYvrP3PvzfKSOBiPevVNBbRO4Jp7rxSJGOpteo3D2JGQT4UALxSlygzvH_KF4mbAAW"]
+WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
 def send(msg: str) -> None:
     requests.post(
