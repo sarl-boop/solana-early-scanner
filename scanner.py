@@ -45,4 +45,6 @@ def main() -> None:
     check_tokens()
 
 if __name__ == "__main__":
-    send("TEST BOT OK")
+    send("BOT ONLINE ✅")
+    main()
+    
