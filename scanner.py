@@ -1,3 +1,4 @@
+import raydium_scanner
 import os
 import json
 import time
