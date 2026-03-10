@@ -205,4 +205,193 @@ def classify_signal(m: dict):
 
     if (
         liq >= 100000
-        and 150000 <= mc <= 300
+        and 150000 <= mc <= 3000000
+        and vol24 >= 400000
+        and tx24 >= 400
+        and buys_h1 >= sells_h1
+        and age_ok_gold
+        and boosts_active >= 1
+    ):
+        return "🟨 GOLD", "BUY priority"
+
+    if (
+        liq >= 35000
+        and 50000 <= mc <= 5000000
+        and vol24 >= 100000
+        and tx24 >= 120
+        and buys_h1 >= sells_h1
+        and age_ok_green
+    ):
+        return "🟢 GREEN", "BUY small"
+
+    return None, None
+
+
+def red_exit(m: dict):
+    liq = m["liquidity_usd"]
+    vol24 = m["volume_h24"]
+    buys_h1 = m["buys_h1"]
+    sells_h1 = m["sells_h1"]
+    price_h1 = m["price_h1"]
+
+    if liq < 15000:
+        return True
+    if vol24 < 20000:
+        return True
+    if price_h1 <= -20:
+        return True
+    if sells_h1 > buys_h1 * 2 and sells_h1 >= 20:
+        return True
+
+    return False
+
+
+def get_candidates():
+    items = []
+
+    profiles = get_json(DEX_PROFILES)
+    boosts = get_json(DEX_BOOSTS)
+
+    for item in profiles[:20]:
+        if (item.get("chainId") or "").lower() != "solana":
+            continue
+
+        name = clean_name(item.get("tokenName") or "")
+        website, x_link, discord_link = extract_links_from_profile(item)
+
+        items.append({
+            "name": name,
+            "token_address": item.get("tokenAddress") or "",
+            "website": website,
+            "x_link": x_link,
+            "discord_link": discord_link,
+        })
+
+    for item in boosts[:20]:
+        if (item.get("chainId") or "").lower() != "solana":
+            continue
+
+        name = clean_name(item.get("tokenName") or "")
+        website, x_link, discord_link = extract_links_from_profile(item)
+
+        items.append({
+            "name": name,
+            "token_address": item.get("tokenAddress") or "",
+            "website": website,
+            "x_link": x_link,
+            "discord_link": discord_link,
+        })
+
+    seen = set()
+    out = []
+
+    for item in items:
+        addr = item["token_address"]
+        if not addr or addr in seen:
+            continue
+        seen.add(addr)
+        out.append(item)
+
+    return out
+
+
+def should_send_same_signal(tracked_item: dict, new_signal: str) -> bool:
+    last_signal = tracked_item.get("last_signal")
+    last_alert_ts = safe_int(tracked_item.get("last_alert_ts"))
+    now = int(time.time())
+
+    if last_signal != new_signal:
+        return True
+    if now - last_alert_ts >= SAME_SIGNAL_COOLDOWN_SEC:
+        return True
+    return False
+
+
+def main():
+    state = load_state()
+    tracked = state.setdefault("tracked", {})
+    alerts = []
+
+    for item in get_candidates():
+        token_address = item["token_address"]
+
+        try:
+            pair = best_pair_for_token(token_address)
+        except Exception:
+            pair = None
+
+        if not pair:
+            continue
+
+        pair_name = clean_name(((pair.get("baseToken") or {}).get("name")) or "")
+        name = item["name"] or pair_name
+
+        pair_website, pair_x, pair_discord = pair_links(pair)
+        website = item["website"] or pair_website
+        x_link = item["x_link"] or pair_x
+
+        if looks_bad(name, website, x_link):
+            continue
+
+        m = metrics_from_pair(pair)
+        color, action = classify_signal(m)
+        if not color:
+            continue
+
+        existing = tracked.get(token_address, {})
+        if not should_send_same_signal(existing, color):
+            continue
+
+        tracked[token_address] = {
+            "name": name,
+            "last_signal": color,
+            "last_alert_ts": int(time.time()),
+            "last_seen": int(time.time()),
+        }
+
+        priority = 2 if color == "🟨 GOLD" else 1
+        alerts.append(
+            (
+                priority,
+                f"{color}\n"
+                f"Token: {name}\n"
+                f"MC: ${int(m['market_cap']):,}\n"
+                f"Liq: ${int(m['liquidity_usd']):,}\n"
+                f"Vol24h: ${int(m['volume_h24']):,}\n"
+                f"Action: {action}"
+            )
+        )
+
+    for token_address, info in list(tracked.items()):
+        try:
+            pair = best_pair_for_token(token_address)
+        except Exception:
+            pair = None
+
+        if not pair:
+            continue
+
+        m = metrics_from_pair(pair)
+        if red_exit(m):
+            alerts.append(
+                (
+                    3,
+                    f"🔴 RED\n"
+                    f"Token: {info.get('name', 'Unknown')}\n"
+                    f"MC: ${int(m['market_cap']):,}\n"
+                    f"Liq: ${int(m['liquidity_usd']):,}\n"
+                    f"Vol24h: ${int(m['volume_h24']):,}\n"
+                    f"Action: SELL / EXIT"
+                )
+            )
+            tracked.pop(token_address, None)
+
+    save_state(state)
+    alerts.sort(key=lambda x: x[0], reverse=True)
+
+    for _, msg in alerts[:MAX_ALERTS_PER_RUN]:
+        send(msg)
+
+
+if __name__ == "__main__":
+    main()
