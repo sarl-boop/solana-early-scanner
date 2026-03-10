@@ -8,8 +8,9 @@ DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS = "https://api.dexscreener.com/token-boosts/latest/v1"
 
 BAD_WORDS = {
-    "test", "official", "pump", "100x", "1000x", "presale", "casino",
-    "bet", "airdrop", "giveaway", "free", "elon", "moon", "lfg"
+    "test", "official", "pump", "100x", "1000x", "presale",
+    "casino", "bet", "airdrop", "giveaway", "free",
+    "elon", "moon", "lfg"
 }
 
 def send(msg: str) -> None:
@@ -34,6 +35,7 @@ def extract_links(item: dict):
     for link in links:
         label = (link.get("label") or "").lower()
         url = (link.get("url") or "").strip()
+
         if not url:
             continue
 
@@ -64,29 +66,11 @@ def looks_bad(name: str, website: str, x_link: str, discord_link: str) -> bool:
     if not website:
         return True
 
-    # au moins une présence sociale
-    if not (x_link or discord_link):
+    # on veut une vraie présence sociale
+    if not x_link:
         return True
 
     return False
-
-def classify(item: dict) -> tuple[str, str]:
-    score = 0
-
-    if item["website"]:
-        score += 2
-    if item["x_link"]:
-        score += 1
-    if item["discord_link"]:
-        score += 1
-    if item["source"] == "boost":
-        score += 2
-
-    if score >= 5:
-        return "🟨 GOLD", "buy small starter position"
-    if score >= 3:
-        return "🟢 GREEN", "buy small starter position"
-    return "🔴 RED", "avoid"
 
 def get_candidates():
     items = []
@@ -131,6 +115,7 @@ def get_candidates():
             "source": "boost",
         })
 
+    # anti doublons
     seen = set()
     out = []
 
@@ -143,6 +128,28 @@ def get_candidates():
 
     return out
 
+def classify(item: dict):
+    score = 0
+
+    if item["website"]:
+        score += 2
+    if item["x_link"]:
+        score += 2
+    if item["discord_link"]:
+        score += 1
+    if item["source"] == "boost":
+        score += 2
+
+    # GOLD = priorité
+    if score >= 6:
+        return "🟨 GOLD", "BUY priority now"
+
+    # GREEN = petite position
+    if score >= 4:
+        return "🟢 GREEN", "BUY small"
+
+    return None, None
+
 def main():
     candidates = get_candidates()
     alerts = []
@@ -154,34 +161,20 @@ def main():
         discord_link = item["discord_link"]
 
         if looks_bad(name, website, x_link, discord_link):
-            # on n’envoie RED que si le token est boosté, sinon silence
-            if item["source"] == "boost" and name:
-                alerts.append(
-                    f"🔴 RED\n"
-                    f"Token: {name}\n"
-                    f"Address: {item['token_address']}\n"
-                    f"Reason: boosted but weak / risky profile\n"
-                    f"Action: avoid"
-                )
             continue
 
         color, action = classify(item)
-
-        if color == "🔴 RED":
+        if not color:
             continue
 
         alerts.append(
             f"{color}\n"
             f"Token: {name}\n"
             f"Address: {item['token_address']}\n"
-            f"Source: {item['source']}\n"
-            f"Website: {website or 'N/A'}\n"
-            f"X: {x_link or 'N/A'}\n"
-            f"Discord: {discord_link or 'N/A'}\n"
             f"Action: {action}"
         )
 
-    # pas de déchet : max 2 alertes utiles par run, sinon silence
+    # pas de déchet : max 2 alertes, sinon silence total
     for msg in alerts[:2]:
         send(msg)
 
