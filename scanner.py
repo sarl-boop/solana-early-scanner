@@ -117,14 +117,25 @@ def fetch_pairs():
         print("Dexscreener API error:", e)
         return []
 
+def risk_level(mc, liq, vol):
 
+    if liq < 30000:
+        return "HIGH"
+    if liq < 100000:
+        return "MEDIUM"
+    if liq > 100000 and vol > 200000:
+        return "LOW"
+    return "MEDIUM"
+    
 def build_message(signal: str, name: str, addr: str, score: int, mc: float, liq: float, vol: float, action: str) -> str:
+    risk = risk_level(mc, liq, vol)
     return (
         f"{signal}\n\n"
         f"Token: {name}\n"
         f"Address: {addr}\n"
         f"Dex: https://dexscreener.com/solana/{addr}\n\n"
         f"Score: {score}/9\n"
+        f"Risk: {risk}\n"
         f"MC: ${int(mc):,}\n"
         f"Liq: ${int(liq):,}\n"
         f"Vol24h: ${int(vol):,}\n\n"
