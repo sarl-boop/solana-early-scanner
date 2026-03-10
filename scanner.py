@@ -465,3 +465,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+import pump_scanner
+import wallet_tracker
+import raydium_scanner
