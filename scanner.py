@@ -34,7 +34,6 @@ def extract_links(item: dict):
     for link in links:
         label = (link.get("label") or "").lower()
         url = (link.get("url") or "").strip()
-
         if not url:
             continue
 
@@ -60,51 +59,38 @@ def looks_bad(name: str, website: str, x_link: str, discord_link: str) -> bool:
         return True
     if any(word in low for word in BAD_WORDS):
         return True
+
+    # pas de projet sérieux sans site
     if not website:
+        return True
+
+    # au moins une présence sociale
+    if not (x_link or discord_link):
         return True
 
     return False
 
-def score_item(item: dict) -> tuple[int, str, str]:
+def classify(item: dict) -> tuple[str, str]:
     score = 0
-    reasons = []
 
-    name = item["name"]
-    website = item["website"]
-    x_link = item["x_link"]
-    discord_link = item["discord_link"]
-    source = item["source"]
-
-    if website:
+    if item["website"]:
         score += 2
-        reasons.append("site")
-    if x_link:
+    if item["x_link"]:
         score += 1
-        reasons.append("X")
-    if discord_link:
+    if item["discord_link"]:
         score += 1
-        reasons.append("Discord")
-    if source == "boost":
+    if item["source"] == "boost":
         score += 2
-        reasons.append("boosted")
 
-    # classification
     if score >= 5:
-        color = "🟨 GOLD"
-        action = "buy small starter position"
-    elif score >= 3:
-        color = "🟢 GREEN"
-        action = "buy small starter position"
-    else:
-        color = "🔴 RED"
-        action = "avoid"
-
-    return score, color, action
+        return "🟨 GOLD", "buy small starter position"
+    if score >= 3:
+        return "🟢 GREEN", "buy small starter position"
+    return "🔴 RED", "avoid"
 
 def get_candidates():
     items = []
 
-    # profiles
     r1 = requests.get(DEX_PROFILES, timeout=20)
     r1.raise_for_status()
     profiles = r1.json()
@@ -125,7 +111,6 @@ def get_candidates():
             "source": "profile",
         })
 
-    # boosts
     r2 = requests.get(DEX_BOOSTS, timeout=20)
     r2.raise_for_status()
     boosts = r2.json()
@@ -146,9 +131,8 @@ def get_candidates():
             "source": "boost",
         })
 
-    # dedupe
-    out = []
     seen = set()
+    out = []
 
     for item in items:
         addr = item["token_address"]
@@ -170,18 +154,18 @@ def main():
         discord_link = item["discord_link"]
 
         if looks_bad(name, website, x_link, discord_link):
-            # RED only if boosted enough to deserve explicit avoid
+            # on n’envoie RED que si le token est boosté, sinon silence
             if item["source"] == "boost" and name:
                 alerts.append(
                     f"🔴 RED\n"
                     f"Token: {name}\n"
                     f"Address: {item['token_address']}\n"
-                    f"Reason: weak profile or too risky\n"
+                    f"Reason: boosted but weak / risky profile\n"
                     f"Action: avoid"
                 )
             continue
 
-        score, color, action = score_item(item)
+        color, action = classify(item)
 
         if color == "🔴 RED":
             continue
@@ -197,11 +181,9 @@ def main():
             f"Action: {action}"
         )
 
-    # no waste: send only top 3 real alerts, otherwise silence
-    sent = 0
-    for msg in alerts[:3]:
+    # pas de déchet : max 2 alertes utiles par run, sinon silence
+    for msg in alerts[:2]:
         send(msg)
-        sent += 1
 
 if __name__ == "__main__":
     main()
