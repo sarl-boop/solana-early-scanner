@@ -1,7 +1,7 @@
 import requests
 import time
 
-WEBHOOK = "https://discord.com/api/webhooks/1480869213722902649/EgV-uIZYYrIs-53RuE8QSCusbpVZ7hCgyq_Lq4-in2obU8dPKYybatIyyg7QiF4248Xy"
+WEBHOOK = "https://discord.com/api/webhooks/1480873681528815642/hiOVyFgqrvRwF3ys8Nb-pA6ccSC29PhStzQbcFCURJe1Fx4KkEUNPzAFeELVjBj9xuNU"
 
 def send(msg):
     requests.post(WEBHOOK, json={"content": msg})
