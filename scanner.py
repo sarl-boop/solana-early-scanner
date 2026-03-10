@@ -1,7 +1,7 @@
 import requests
 import os
 
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+WEBHOOK = os.environ["https://discord.com/api/webhooks/1480873681528815642/hiOVyFgqrvRwF3ys8Nb-pA6ccSC29PhStzQbcFCURJe1Fx4KkEUNPzAFeELVjBj9xuNU"]
 
 def send(msg):
     requests.post(WEBHOOK, json={"content": msg}, timeout=20)
