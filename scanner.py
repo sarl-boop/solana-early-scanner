@@ -1,4 +1,3 @@
-import raydium_scanner
 import os
 import json
 import time
@@ -134,7 +133,6 @@ def build_message(signal: str, name: str, addr: str, score: int, mc: float, liq:
 
 def main():
     state = load_state()
-    raydium_scanner.scan(send)
     pairs = fetch_pairs()
 
     alerts = []
