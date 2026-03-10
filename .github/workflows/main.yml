@@ -1,21 +1,27 @@
-name: Solana Early Scanner
+name: Crypto Scanner
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      - name
+      - name: Install requests
+        run: pip install requests
+
+      - name: Run scanner
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scanner.py
