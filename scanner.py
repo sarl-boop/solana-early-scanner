@@ -19,13 +19,19 @@ BAD_WORDS = {
     "elon", "moon", "lfg"
 }
 
+MAX_ALERTS_PER_RUN = 2
+SAME_SIGNAL_COOLDOWN_SEC = 6 * 3600  # 6h
+
+
 def send(msg: str) -> None:
     requests.post(WEBHOOK, json={"content": msg}, timeout=20)
+
 
 def get_json(url: str):
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     return r.json()
+
 
 def load_state():
     if not STATE_FILE.exists():
@@ -35,11 +41,27 @@ def load_state():
     except Exception:
         return {"tracked": {}}
 
+
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-def clean_name(item: dict) -> str:
-    name = (item.get("tokenName") or "").strip()
+
+def safe_float(x) -> float:
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+
+
+def safe_int(x) -> int:
+    try:
+        return int(float(x or 0))
+    except Exception:
+        return 0
+
+
+def clean_name(raw_name: str) -> str:
+    name = (raw_name or "").strip()
     if not name:
         return ""
     if name.startswith("http://") or name.startswith("https://"):
@@ -48,27 +70,6 @@ def clean_name(item: dict) -> str:
         return ""
     return name
 
-def extract_links(item: dict):
-    links = item.get("links") or []
-    website = ""
-    x_link = ""
-    discord_link = ""
-
-    for link in links:
-        label = (link.get("label") or "").lower()
-        url = (link.get("url") or "").strip()
-
-        if not url:
-            continue
-
-        if "website" in label and not website:
-            website = url
-        elif ("twitter" in label or label == "x") and not x_link:
-            x_link = url
-        elif "discord" in label and not discord_link:
-            discord_link = url
-
-    return website, x_link, discord_link
 
 def looks_bad(name: str, website: str, x_link: str) -> bool:
     low = name.lower()
@@ -90,6 +91,62 @@ def looks_bad(name: str, website: str, x_link: str) -> bool:
 
     return False
 
+
+def extract_links_from_profile(item: dict):
+    links = item.get("links") or []
+    website = ""
+    x_link = ""
+    discord_link = ""
+
+    for link in links:
+        label = (link.get("label") or "").lower()
+        url = (link.get("url") or "").strip()
+
+        if not url:
+            continue
+
+        if "website" in label and not website:
+            website = url
+        elif ("twitter" in label or label == "x") and not x_link:
+            x_link = url
+        elif "discord" in label and not discord_link:
+            discord_link = url
+
+    return website, x_link, discord_link
+
+
+def pair_links(pair: dict):
+    info = pair.get("info") or {}
+    websites = info.get("websites") or []
+    socials = info.get("socials") or []
+
+    website = ""
+    x_link = ""
+    discord_link = ""
+
+    if websites:
+        website = (websites[0].get("url") or "").strip()
+
+    for s in socials:
+        platform = (s.get("platform") or "").lower()
+        handle = (s.get("handle") or "").strip()
+        if not handle:
+            continue
+
+        if platform in ("twitter", "x") and not x_link:
+            x_link = handle if handle.startswith("http") else f"https://x.com/{handle.lstrip('@')}"
+        elif platform == "discord" and not discord_link:
+            discord_link = handle if handle.startswith("http") else handle
+
+    return website, x_link, discord_link
+
+
+def txns_count(block: dict) -> int:
+    if not isinstance(block, dict):
+        return 0
+    return safe_int(block.get("buys")) + safe_int(block.get("sells"))
+
+
 def best_pair_for_token(token_address: str):
     url = DEX_TOKEN_PAIRS.format(token=token_address)
     pairs = get_json(url)
@@ -101,35 +158,12 @@ def best_pair_for_token(token_address: str):
     if not pairs:
         return None
 
-    def liq_usd(p):
-        return float((p.get("liquidity") or {}).get("usd") or 0)
+    return sorted(
+        pairs,
+        key=lambda p: safe_float((p.get("liquidity") or {}).get("usd")),
+        reverse=True
+    )[0]
 
-    return sorted(pairs, key=liq_usd, reverse=True)[0]
-
-def pair_links(pair: dict):
-    info = pair.get("info") or {}
-    websites = info.get("websites") or []
-    socials = info.get("socials") or []
-
-    website = websites[0].get("url") if websites else ""
-    x_link = ""
-    discord_link = ""
-
-    for s in socials:
-        platform = (s.get("platform") or "").lower()
-        handle = (s.get("handle") or "").strip()
-
-        if platform in ("twitter", "x") and handle and not x_link:
-            x_link = handle if handle.startswith("http") else f"https://x.com/{handle.lstrip('@')}"
-        elif platform == "discord" and handle and not discord_link:
-            discord_link = handle
-
-    return website or "", x_link or "", discord_link or ""
-
-def txns_count(block: dict) -> int:
-    if not isinstance(block, dict):
-        return 0
-    return int(block.get("buys", 0) or 0) + int(block.get("sells", 0) or 0)
 
 def metrics_from_pair(pair: dict):
     txns = pair.get("txns") or {}
@@ -144,18 +178,19 @@ def metrics_from_pair(pair: dict):
         age_hours = max(0, (time.time() * 1000 - created_at) / 3600000)
 
     return {
-        "liquidity_usd": float(liquidity.get("usd") or 0),
-        "market_cap": float(pair.get("marketCap") or pair.get("fdv") or 0),
-        "volume_h24": float(volume.get("h24") or 0),
+        "liquidity_usd": safe_float(liquidity.get("usd")),
+        "market_cap": safe_float(pair.get("marketCap") or pair.get("fdv")),
+        "volume_h24": safe_float(volume.get("h24")),
         "txns_h24": txns_count(txns.get("h24") or {}),
-        "buys_h1": int(((txns.get("h1") or {}).get("buys")) or 0),
-        "sells_h1": int(((txns.get("h1") or {}).get("sells")) or 0),
-        "price_h1": float(price_change.get("h1") or 0),
-        "boosts_active": int(boosts.get("active") or 0),
+        "buys_h1": safe_int((txns.get("h1") or {}).get("buys")),
+        "sells_h1": safe_int((txns.get("h1") or {}).get("sells")),
+        "price_h1": safe_float(price_change.get("h1")),
+        "boosts_active": safe_int(boosts.get("active")),
         "age_hours": age_hours,
     }
 
-def classify_signal(m):
+
+def classify_signal(m: dict):
     liq = m["liquidity_usd"]
     mc = m["market_cap"]
     vol24 = m["volume_h24"]
@@ -165,24 +200,26 @@ def classify_signal(m):
     age = m["age_hours"]
     boosts_active = m["boosts_active"]
 
-    age_ok_gold = age is None or age <= 72
-    age_ok_green = age is None or age <= 120
+    age_ok_gold = age is None or age <= 48
+    age_ok_green = age is None or age <= 96
 
+    # GOLD = vrai achat prioritaire
     if (
-        liq >= 75000
-        and 100000 <= mc <= 3000000
-        and vol24 >= 250000
-        and tx24 >= 300
+        liq >= 100000
+        and 150000 <= mc <= 3000000
+        and vol24 >= 400000
+        and tx24 >= 400
         and buys_h1 >= sells_h1
         and age_ok_gold
         and boosts_active >= 1
     ):
         return "🟨 GOLD", "BUY priority"
 
+    # GREEN = petit achat
     if (
-        liq >= 30000
+        liq >= 35000
         and 50000 <= mc <= 5000000
-        and vol24 >= 80000
+        and vol24 >= 100000
         and tx24 >= 120
         and buys_h1 >= sells_h1
         and age_ok_green
@@ -191,7 +228,8 @@ def classify_signal(m):
 
     return None, None
 
-def red_exit(m):
+
+def red_exit(m: dict):
     liq = m["liquidity_usd"]
     vol24 = m["volume_h24"]
     buys_h1 = m["buys_h1"]
@@ -209,17 +247,20 @@ def red_exit(m):
 
     return False
 
+
 def get_candidates():
     items = []
 
     profiles = get_json(DEX_PROFILES)
     boosts = get_json(DEX_BOOSTS)
 
-    for item in profiles[:30]:
+    for item in profiles[:20]:
         if (item.get("chainId") or "").lower() != "solana":
             continue
-        name = clean_name(item)
-        website, x_link, discord_link = extract_links(item)
+
+        name = clean_name(item.get("tokenName") or "")
+        website, x_link, discord_link = extract_links_from_profile(item)
+
         items.append({
             "name": name,
             "token_address": item.get("tokenAddress") or "",
@@ -229,11 +270,13 @@ def get_candidates():
             "source": "profile",
         })
 
-    for item in boosts[:30]:
+    for item in boosts[:20]:
         if (item.get("chainId") or "").lower() != "solana":
             continue
-        name = clean_name(item)
-        website, x_link, discord_link = extract_links(item)
+
+        name = clean_name(item.get("tokenName") or "")
+        website, x_link, discord_link = extract_links_from_profile(item)
+
         items.append({
             "name": name,
             "token_address": item.get("tokenAddress") or "",
@@ -255,29 +298,49 @@ def get_candidates():
 
     return out
 
+
+def should_send_same_signal(tracked_item: dict, new_signal: str) -> bool:
+    last_signal = tracked_item.get("last_signal")
+    last_alert_ts = safe_int(tracked_item.get("last_alert_ts"))
+    now = int(time.time())
+
+    if last_signal != new_signal:
+        return True
+    if now - last_alert_ts >= SAME_SIGNAL_COOLDOWN_SEC:
+        return True
+    return False
+
+
 def main():
     state = load_state()
     tracked = state.setdefault("tracked", {})
     alerts = []
 
-    # nouveaux GREEN / GOLD
+    # 1) nouveaux GOLD / GREEN
     for item in get_candidates():
-        name = item["name"]
-        website = item["website"]
-        x_link = item["x_link"]
+        token_address = item["token_address"]
 
-        if looks_bad(name, website, x_link):
-            continue
+        pair = None
+        try:
+            pair = best_pair_for_token(token_address)
+        except Exception:
+            pair = None
 
-        pair = best_pair_for_token(item["token_address"])
         if not pair:
             continue
 
+        pair_name = clean_name(((pair.get("baseToken") or {}).get("name")) or "")
+        name = item["name"] or pair_name
+
+        profile_website = item["website"]
+        profile_x = item["x_link"]
+        profile_discord = item["discord_link"]
+
         pair_website, pair_x, pair_discord = pair_links(pair)
 
-        website = website or pair_website
-        x_link = x_link or pair_x
-        discord_link = item["discord_link"] or pair_discord
+        website = profile_website or pair_website
+        x_link = profile_x or pair_x
+        discord_link = profile_discord or pair_discord
 
         if looks_bad(name, website, x_link):
             continue
@@ -287,9 +350,14 @@ def main():
         if not color:
             continue
 
-        tracked[item["token_address"]] = {
+        existing = tracked.get(token_address, {})
+        if not should_send_same_signal(existing, color):
+            continue
+
+        tracked[token_address] = {
             "name": name,
             "last_signal": color,
+            "last_alert_ts": int(time.time()),
             "last_seen": int(time.time()),
         }
 
@@ -306,8 +374,9 @@ def main():
             )
         )
 
-    # RED seulement pour tokens déjà suivis
+    # 2) RED seulement sur tokens déjà suivis
     for token_address, info in list(tracked.items()):
+        pair = None
         try:
             pair = best_pair_for_token(token_address)
         except Exception:
@@ -333,11 +402,12 @@ def main():
 
     save_state(state)
 
-    # priorité : RED > GOLD > GREEN
+    # priorité RED > GOLD > GREEN
     alerts.sort(key=lambda x: x[0], reverse=True)
 
-    for _, msg in alerts[:2]:
+    for _, msg in alerts[:MAX_ALERTS_PER_RUN]:
         send(msg)
+
 
 if __name__ == "__main__":
     main()
