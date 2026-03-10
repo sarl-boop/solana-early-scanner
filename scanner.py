@@ -149,9 +149,8 @@ def main():
                 continue
 
             name = (
-                base.get("name")
-                or base.get("symbol")
-                or p.get("pairAddress")
+                base.get("symbol")
+                or base.get("name")
                 or "Unknown Token"
             )
 
