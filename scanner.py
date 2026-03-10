@@ -122,7 +122,8 @@ def build_message(signal: str, name: str, addr: str, score: int, mc: float, liq:
     return (
         f"{signal}\n\n"
         f"Token: {name}\n"
-        f"Address: {addr}\n\n"
+        f"Address: {addr}\n"
+        f"Dex: https://dexscreener.com/solana/{addr}\n\n"
         f"Score: {score}/9\n"
         f"MC: ${int(mc):,}\n"
         f"Liq: ${int(liq):,}\n"
