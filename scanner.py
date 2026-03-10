@@ -2,7 +2,7 @@ import os
 import requests
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
-
+send ("Test BOT OK")
 def send(msg: str) -> None:
     requests.post(
         WEBHOOK,
