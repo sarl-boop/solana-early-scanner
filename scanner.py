@@ -2,7 +2,7 @@ import os
 import requests
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
-send ("Test BOT OK")
+
 def send(msg: str) -> None:
     requests.post(
         WEBHOOK,
@@ -45,4 +45,4 @@ def main() -> None:
     check_tokens()
 
 if __name__ == "__main__":
-    main()
+    send("TEST BOT OK")
