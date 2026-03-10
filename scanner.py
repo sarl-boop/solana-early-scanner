@@ -151,6 +151,7 @@ def classify(item: dict):
     return None, None
 
 def main():
+    send("BOT SCAN RUNNING")
     candidates = get_candidates()
     alerts = []
 
