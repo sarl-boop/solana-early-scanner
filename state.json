@@ -1,5 +1,4 @@
 {
-  "seen": {},
-  "owned": {},
-  "last_status": 0
+  "last_status_ts": 0,
+  "alerted": {}
 }
