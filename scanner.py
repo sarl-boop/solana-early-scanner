@@ -17,7 +17,7 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-GT_PAGES = 5                   # 5 pages ~ 100 pools, plus stable pour GitHub
+GT_PAGES = 10                   # 5 pages ~ 100 pools, plus stable pour GitHub
 MAX_ALERTS_PER_RUN = 3
 TIMEOUT = 15
 ALERT_COOLDOWN_HOURS = 12
@@ -344,7 +344,7 @@ def rug_reject(candidate, profile):
     if not candidate["token_address"]:
         return True, "pas d'adresse"
 
-    if mc <= 0 or mc > 5_000_000:
+    if mc <= 0 or mc > 8_000_000:
         return True, "hors filtre micro-cap"
 
     if liq < 20_000:
@@ -418,7 +418,7 @@ def compute_score(candidate, profile, boosted):
 
     # volume burst
     burst = False
-    if v1 > 0 and (v5 * 12) > (0.35 * v1) and tx5 >= 10:
+    if v1 > 0 and (v5 * 10) > (0.25 * v1) and tx5 >= 6:
         score += 2
         reasons.append("volume 5m accélère")
         burst = True
