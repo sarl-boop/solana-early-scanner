@@ -1,8 +1,14 @@
 import os
+import json
 import time
-import math
-import requests
+from pathlib import Path
 from datetime import datetime, timezone
+
+import requests
+
+# =========================
+# CONFIG
+# =========================
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "").strip()
@@ -10,16 +16,22 @@ OWNED_TOKENS = {
     x.strip() for x in os.environ.get("OWNED_TOKENS", "").split(",") if x.strip()
 }
 
-GT_PAGES = 10
+STATE_FILE = Path("state.json")
+
+GT_PAGES = 5                  # 5 pages ≈ 100 pools, évite les 429
 MAX_ALERTS_PER_RUN = 3
 TIMEOUT = 15
+ALERT_COOLDOWN_HOURS = 12
 
-GT_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
+GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 DEX_BOOSTS_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 BIRDEYE_TOP_TRADERS = "https://public-api.birdeye.so/defi/v2/tokens/top_traders"
 
+# =========================
+# UTILS
+# =========================
 
 def send(msg: str) -> None:
     try:
@@ -47,31 +59,83 @@ def to_float(v, default=0.0):
         return default
 
 
-def parse_age_minutes(v):
-    if not v:
-        return None
+def load_state():
+    default_state = {
+        "last_status_ts": 0,
+        "alerted": {}
+    }
+
+    if not STATE_FILE.exists():
+        return default_state
+
     try:
-        # ISO time
-        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return default_state
+        if "last_status_ts" not in data:
+            data["last_status_ts"] = 0
+        if "alerted" not in data or not isinstance(data["alerted"], dict):
+            data["alerted"] = {}
+        return data
+    except Exception as e:
+        print("State load error:", e)
+        return default_state
+
+
+def save_state(state):
+    try:
+        STATE_FILE.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print("State save error:", e)
+
+
+def recently_alerted(state, token_addr: str):
+    ts = state["alerted"].get(token_addr, 0)
+    return (time.time() - ts) < ALERT_COOLDOWN_HOURS * 3600
+
+
+def mark_alerted(state, token_addr: str):
+    state["alerted"][token_addr] = int(time.time())
+
+
+def cleanup_old_alerts(state):
+    now = time.time()
+    keep = {}
+    for addr, ts in state["alerted"].items():
+        if now - ts < 7 * 24 * 3600:
+            keep[addr] = ts
+    state["alerted"] = keep
+
+
+def parse_age_minutes(value):
+    if not value:
+        return None
+
+    # ISO date
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 60.0)
     except Exception:
-        try:
-            # epoch ms
-            ts = int(v)
-            if ts > 10_000_000_000:
-                ts = ts / 1000.0
-            return max(0.0, (time.time() - ts) / 60.0)
-        except Exception:
-            return None
+        pass
+
+    # epoch
+    try:
+        ts = int(value)
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
+        return max(0.0, (time.time() - ts) / 60.0)
+    except Exception:
+        return None
 
 
 def tx_count(bucket):
     if not isinstance(bucket, dict):
         return 0
-    buys = bucket.get("buys", 0)
-    sells = bucket.get("sells", 0)
     try:
-        return int(buys) + int(sells)
+        return int(bucket.get("buys", 0)) + int(bucket.get("sells", 0))
     except Exception:
         return 0
 
@@ -89,6 +153,9 @@ def buy_ratio(bucket):
     except Exception:
         return 0.5
 
+# =========================
+# SOURCES
+# =========================
 
 def fetch_dex_profiles():
     out = {}
@@ -99,6 +166,7 @@ def fetch_dex_profiles():
     for item in data:
         if item.get("chainId") != "solana":
             continue
+
         addr = item.get("tokenAddress")
         if not addr:
             continue
@@ -141,9 +209,12 @@ def fetch_dex_boosts():
         data = get_json(url)
         if not isinstance(data, list):
             continue
+
         for item in data:
-            if item.get("chainId") == "solana" and item.get("tokenAddress"):
-                boosted.add(item["tokenAddress"])
+            if item.get("chainId") == "solana":
+                addr = item.get("tokenAddress")
+                if addr:
+                    boosted.add(addr)
 
     return boosted
 
@@ -153,10 +224,11 @@ def fetch_gecko_new_pools():
 
     for page in range(1, GT_PAGES + 1):
         data = get_json(
-            GT_NEW_POOLS,
+            GECKO_NEW_POOLS,
             params={"page": page, "include": "base_token,dex"},
             headers={"accept": "application/json"},
         )
+
         if not data or "data" not in data:
             continue
 
@@ -201,20 +273,21 @@ def fetch_gecko_new_pools():
                 or ""
             ).lower()
 
-            mc = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
-            liq = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
+            market_cap = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
+            liquidity = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
 
             volume_map = attrs.get("volume_usd", {}) or {}
             tx_map = attrs.get("transactions", {}) or {}
 
-            v5 = to_float(volume_map.get("m5"))
-            v1 = to_float(volume_map.get("h1"))
-            v24 = to_float(volume_map.get("h24"))
+            volume_5m = to_float(volume_map.get("m5"))
+            volume_1h = to_float(volume_map.get("h1"))
+            volume_24h = to_float(volume_map.get("h24"))
 
-            tx5 = tx_count(tx_map.get("m5"))
-            tx1 = tx_count(tx_map.get("h1"))
-            br5 = buy_ratio(tx_map.get("m5"))
-            br1 = buy_ratio(tx_map.get("h1"))
+            tx_5m = tx_count(tx_map.get("m5"))
+            tx_1h = tx_count(tx_map.get("h1"))
+
+            buy_ratio_5m = buy_ratio(tx_map.get("m5"))
+            buy_ratio_1h = buy_ratio(tx_map.get("h1"))
 
             age_min = parse_age_minutes(
                 attrs.get("pool_created_at")
@@ -226,22 +299,25 @@ def fetch_gecko_new_pools():
                 "symbol": symbol,
                 "token_address": token_addr,
                 "dex_id": dex_id,
-                "market_cap": mc,
-                "liquidity": liq,
-                "volume_5m": v5,
-                "volume_1h": v1,
-                "volume_24h": v24,
-                "tx_5m": tx5,
-                "tx_1h": tx1,
-                "buy_ratio_5m": br5,
-                "buy_ratio_1h": br1,
+                "market_cap": market_cap,
+                "liquidity": liquidity,
+                "volume_5m": volume_5m,
+                "volume_1h": volume_1h,
+                "volume_24h": volume_24h,
+                "tx_5m": tx_5m,
+                "tx_1h": tx_1h,
+                "buy_ratio_5m": buy_ratio_5m,
+                "buy_ratio_1h": buy_ratio_1h,
                 "age_min": age_min,
             })
 
-        time.sleep(0.15)
+        time.sleep(0.25)  # réduit le risque de 429
 
     return pools
 
+# =========================
+# SMART MONEY (optionnel)
+# =========================
 
 def get_smart_money_bonus(token_address: str) -> int:
     if not BIRDEYE_API_KEY:
@@ -281,8 +357,11 @@ def get_smart_money_bonus(token_address: str) -> int:
         return 1
     return 0
 
+# =========================
+# FILTERS / SCORE
+# =========================
 
-def has_enough_socials(profile):
+def enough_socials(profile):
     if not profile:
         return False
     score = 0
@@ -295,21 +374,20 @@ def has_enough_socials(profile):
     return score >= 2
 
 
-def advanced_rug_reject(c, profile):
-    mc = c["market_cap"]
-    liq = c["liquidity"]
-    v5 = c["volume_5m"]
-    v1 = c["volume_1h"]
-    v24 = c["volume_24h"]
-    tx5 = c["tx_5m"]
-    br5 = c["buy_ratio_5m"]
-    age = c["age_min"]
+def rug_reject(candidate, profile):
+    mc = candidate["market_cap"]
+    liq = candidate["liquidity"]
+    v24 = candidate["volume_24h"]
+    v5 = candidate["volume_5m"]
+    tx5 = candidate["tx_5m"]
+    br5 = candidate["buy_ratio_5m"]
+    age = candidate["age_min"]
 
-    if not c["token_address"]:
-        return True, "pas d'adresse token"
+    if not candidate["token_address"]:
+        return True, "pas d'adresse"
 
     if mc <= 0 or mc > 5_000_000:
-        return True, "market cap hors filtre"
+        return True, "hors filtre micro-cap"
 
     if liq < 20_000:
         return True, "liquidité trop faible"
@@ -318,45 +396,41 @@ def advanced_rug_reject(c, profile):
         return True, "liquidité trop faible vs market cap"
 
     if age is not None and age < 2:
-        return True, "token trop neuf"
+        return True, "trop neuf"
 
     if age is not None and age > 720:
-        return True, "token plus vraiment early"
+        return True, "plus vraiment early"
 
     if v24 < 20_000:
         return True, "volume 24h trop faible"
 
     if tx5 < 5 and v5 < 2_500:
-        return True, "pas assez d'activité immédiate"
+        return True, "activité trop faible"
 
     if br5 < 0.45:
         return True, "pression vendeuse"
 
-    if not has_enough_socials(profile):
+    if not enough_socials(profile):
         return True, "socials insuffisants"
-
-    # si 1h existe et que 5m est totalement mort
-    if v1 > 0 and v5 <= 0:
-        return True, "pas de burst 5m"
 
     return False, ""
 
 
-def compute_score(c, profile, boosted, smart_bonus):
-    mc = c["market_cap"]
-    liq = c["liquidity"]
-    v5 = c["volume_5m"]
-    v1 = c["volume_1h"]
-    v24 = c["volume_24h"]
-    tx5 = c["tx_5m"]
-    tx1 = c["tx_1h"]
-    br5 = c["buy_ratio_5m"]
-    age = c["age_min"]
+def compute_score(candidate, profile, boosted, smart_bonus):
+    mc = candidate["market_cap"]
+    liq = candidate["liquidity"]
+    v5 = candidate["volume_5m"]
+    v1 = candidate["volume_1h"]
+    v24 = candidate["volume_24h"]
+    tx5 = candidate["tx_5m"]
+    tx1 = candidate["tx_1h"]
+    br5 = candidate["buy_ratio_5m"]
+    age = candidate["age_min"]
 
     score = 0
     reasons = []
 
-    # micro-cap priority
+    # MICRO-CAP PRIORITY
     if mc < 500_000:
         score += 3
         reasons.append("micro-cap très basse")
@@ -366,7 +440,7 @@ def compute_score(c, profile, boosted, smart_bonus):
     elif mc < 5_000_000:
         score += 1
 
-    # liquidity quality
+    # LIQUIDITY
     liq_ratio = liq / max(mc, 1)
     if liq > 100_000:
         score += 2
@@ -381,12 +455,12 @@ def compute_score(c, profile, boosted, smart_bonus):
     elif liq_ratio > 0.10:
         score += 1
 
-    # volume burst
+    # VOLUME BURST
     burst = False
     if v1 > 0 and (v5 * 12) > (0.35 * v1) and tx5 >= 10:
         score += 2
-        burst = True
         reasons.append("volume 5m accélère")
+        burst = True
     elif v5 > 10_000 and tx5 >= 8:
         score += 1
         reasons.append("activité 5m monte")
@@ -397,14 +471,14 @@ def compute_score(c, profile, boosted, smart_bonus):
     elif v24 > 100_000:
         score += 1
 
-    # buys
+    # BUY PRESSURE
     if br5 > 0.60:
         score += 2
         reasons.append("plus d'acheteurs que de vendeurs")
     elif br5 > 0.53:
         score += 1
 
-    # tx acceleration
+    # TX BURST
     if tx5 >= 20:
         score += 2
     elif tx5 >= 10:
@@ -415,7 +489,7 @@ def compute_score(c, profile, boosted, smart_bonus):
         if not burst:
             reasons.append("transactions accélèrent")
 
-    # socials
+    # SOCIALS
     social_score = 0
     if profile:
         if profile.get("has_website"):
@@ -432,17 +506,17 @@ def compute_score(c, profile, boosted, smart_bonus):
         score += 1
         reasons.append("présence sociale correcte")
 
-    # Dex boosts
-    if c["token_address"] in boosted:
+    # DEX BOOSTS
+    if candidate["token_address"] in boosted:
         score += 1
         reasons.append("boost DexScreener")
 
-    # Pump.fun / launchpad bonus
-    if "pump-fun" in c["dex_id"] or "launchlab" in c["dex_id"] or "dbc" in c["dex_id"]:
+    # PUMP / LAUNCHPAD
+    if "pump" in candidate["dex_id"] or "launch" in candidate["dex_id"]:
         score += 1
         reasons.append("très early launchpad")
 
-    # Smart money bonus
+    # SMART MONEY
     if smart_bonus >= 2:
         score += 2
         reasons.append("smart money détecté")
@@ -450,7 +524,7 @@ def compute_score(c, profile, boosted, smart_bonus):
         score += 1
         reasons.append("quelques top traders détectés")
 
-    # age
+    # AGE
     if age is not None and 5 <= age <= 120:
         score += 1
 
@@ -465,40 +539,49 @@ def classify_buy(score):
     return None, None
 
 
-def classify_sell(c):
-    liq = c["liquidity"]
-    v5 = c["volume_5m"]
-    br5 = c["buy_ratio_5m"]
+def classify_sell(candidate):
+    liq = candidate["liquidity"]
+    v5 = candidate["volume_5m"]
+    br5 = candidate["buy_ratio_5m"]
 
     if liq < 10_000 or (v5 < 3_000 and br5 < 0.35):
         return "🔴 RED", "Sell"
     return None, None
 
+# =========================
+# MESSAGE
+# =========================
 
-def build_message(color, c, score, reasons, action):
-    mc = int(c["market_cap"])
-    liq = int(c["liquidity"])
+def build_message(color, candidate, score, reasons, action):
+    mc = int(candidate["market_cap"])
+    liq = int(candidate["liquidity"])
     age = "?"
-    if c["age_min"] is not None:
-        age = f"{int(c['age_min'])} min"
+    if candidate["age_min"] is not None:
+        age = f"{int(candidate['age_min'])} min"
 
     reason = " + ".join(reasons[:3]) if reasons else "signal confirmé"
 
     return (
         f"{color}\n\n"
-        f"Token name: {c['name']}\n"
+        f"Token name: {candidate['name']}\n"
         f"Score: {score}/10\n"
         f"Color: {color}\n"
         f"Market cap: ${mc:,}\n"
         f"Liquidity: ${liq:,}\n"
         f"Reason: {reason}\n"
         f"Age: {age}\n"
-        f"Dex: https://dexscreener.com/solana/{c['token_address']}\n\n"
+        f"Dex: https://dexscreener.com/solana/{candidate['token_address']}\n\n"
         f"Action: {action}"
     )
 
+# =========================
+# MAIN
+# =========================
 
 def main():
+    state = load_state()
+    cleanup_old_alerts(state)
+
     profiles = fetch_dex_profiles()
     boosted = fetch_dex_boosts()
     pools = fetch_gecko_new_pools()
@@ -506,51 +589,62 @@ def main():
     print(f"Fetched {len(pools)} new pools")
 
     if not pools:
-        send("🤖 SCANNER ACTIVE — No signals detected")
+        send("🤖 SCANNER ACTIVE — No signals detected | Checked 0 pools")
+        save_state(state)
         return
 
     alerts = []
 
-    for c in pools:
-        profile = profiles.get(c["token_address"], {})
-        reject, why = advanced_rug_reject(c, profile)
+    for candidate in pools:
+        token_addr = candidate["token_address"]
+        profile = profiles.get(token_addr, {})
+
+        reject, why = rug_reject(candidate, profile)
         if reject:
             continue
 
         smart_bonus = 0
-        # on ne dépense des appels Birdeye que pour les candidats déjà intéressants
-        rough_interest = (
-            c["market_cap"] < 5_000_000
-            and c["liquidity"] > 20_000
-            and c["volume_24h"] > 50_000
+        rough_candidate = (
+            candidate["market_cap"] < 5_000_000
+            and candidate["liquidity"] > 20_000
+            and candidate["volume_24h"] > 50_000
         )
-        if rough_interest and BIRDEYE_API_KEY:
-            smart_bonus = get_smart_money_bonus(c["token_address"])
 
-        score, reasons = compute_score(c, profile, boosted, smart_bonus)
+        if rough_candidate and BIRDEYE_API_KEY:
+            smart_bonus = get_smart_money_bonus(token_addr)
 
-        color, action = classify_buy(score)
-        if color:
-            alerts.append((score, build_message(color, c, score, reasons, action)))
+        score, reasons = compute_score(candidate, profile, boosted, smart_bonus)
+
+        buy_color, buy_action = classify_buy(score)
+        if buy_color and not recently_alerted(state, token_addr):
+            alerts.append(
+                (score, build_message(buy_color, candidate, score, reasons, buy_action), token_addr)
+            )
             continue
 
-        if c["token_address"] in OWNED_TOKENS:
-            sell_color, sell_action = classify_sell(c)
-            if sell_color:
-                alerts.append((score, build_message(sell_color, c, score, reasons, sell_action)))
+        if token_addr in OWNED_TOKENS:
+            sell_color, sell_action = classify_sell(candidate)
+            if sell_color and not recently_alerted(state, token_addr):
+                alerts.append(
+                    (score, build_message(sell_color, candidate, score, reasons, sell_action), token_addr)
+                )
 
     alerts.sort(key=lambda x: x[0], reverse=True)
 
     if not alerts:
         send(f"🤖 SCANNER ACTIVE — No signals detected | Checked {len(pools)} pools")
+        save_state(state)
         return
 
     sent = 0
-    for _, msg in alerts:
+    for _, msg, token_addr in alerts:
         send(msg)
+        mark_alerted(state, token_addr)
         sent += 1
         if sent >= MAX_ALERTS_PER_RUN:
             break
+
+    save_state(state)
 
 
 if __name__ == "__main__":
