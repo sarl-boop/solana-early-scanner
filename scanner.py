@@ -17,7 +17,7 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-# Batch agressif mais raisonnable pour GitHub
+# Batch agressif mais encore raisonnable pour GitHub
 BATCHES = 10
 PAGES_PER_BATCH = 1
 PAUSE_BETWEEN_BATCHES = 1.8
@@ -160,7 +160,7 @@ def get_json(url: str, params=None, headers=None):
         return None
 
 
-def get_json_with_429_retry(url: str, params=None, headers=None, retries=1):
+def get_json_with_429_retry(url: str, params=None, headers=None, retries=2):
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
@@ -254,6 +254,7 @@ def fetch_dex_boosts():
 def fetch_gecko_new_pools_batched():
     pools = []
     page = 1
+    raw_count = 0
 
     for _ in range(BATCHES):
         for _ in range(PAGES_PER_BATCH):
@@ -261,7 +262,7 @@ def fetch_gecko_new_pools_batched():
                 GECKO_NEW_POOLS,
                 params={"page": page, "include": "base_token,dex"},
                 headers={"accept": "application/json"},
-                retries=1,
+                retries=2,
             )
 
             if data and "data" in data:
@@ -271,6 +272,8 @@ def fetch_gecko_new_pools_batched():
                     inc_map[(obj.get("type"), obj.get("id"))] = obj
 
                 for pool in data.get("data", []):
+                    raw_count += 1
+
                     attrs = pool.get("attributes", {}) or {}
                     rels = pool.get("relationships", {}) or {}
 
@@ -354,15 +357,16 @@ def fetch_gecko_new_pools_batched():
         if addr and addr not in dedup:
             dedup[addr] = p
 
+    print(f"Raw pools fetched: {raw_count}")
     return list(dedup.values())
 
 # =========================
 # FILTERS
 # =========================
 
-def enough_socials(profile):
+def socials_quality(profile):
     if not profile:
-        return False
+        return 0
     score = 0
     if profile.get("has_website"):
         score += 1
@@ -370,7 +374,7 @@ def enough_socials(profile):
         score += 1
     if profile.get("has_discord") or profile.get("has_telegram"):
         score += 1
-    return score >= 2
+    return score
 
 
 def rug_reject(candidate, profile):
@@ -409,7 +413,10 @@ def rug_reject(candidate, profile):
     if br5 < 0.45:
         return True
 
-    if not enough_socials(profile):
+    # plus intelligent : on ne rejette pas automatiquement si les socials
+    # DexScreener ne sont pas encore enrichis.
+    # Mais si socials = 0 ET activité faible, on rejette.
+    if socials_quality(profile) == 0 and (v24 < 40_000 or tx5 < 8):
         return True
 
     return False
@@ -432,7 +439,7 @@ def compute_score(candidate, profile, boosted):
     score = 0
     reasons = []
 
-    # Micro-cap plus agressif
+    # Micro-cap
     if mc < 800_000:
         score += 3
         reasons.append("micro-cap basse")
@@ -457,7 +464,7 @@ def compute_score(candidate, profile, boosted):
     elif liq_ratio > 0.10:
         score += 1
 
-    # Volume burst plus sensible
+    # Volume burst
     burst = False
     if v1 > 0 and (v5 * 10) > (0.25 * v1) and tx5 >= 6:
         score += 2
@@ -491,20 +498,14 @@ def compute_score(candidate, profile, boosted):
         if not burst:
             reasons.append("transactions accélèrent")
 
-    # Socials
-    social_score = 0
-    if profile:
-        if profile.get("has_website"):
-            social_score += 1
-        if profile.get("has_x"):
-            social_score += 1
-        if profile.get("has_discord") or profile.get("has_telegram"):
-            social_score += 1
-
+    # Socials : bonus, pas mur absolu
+    social_score = socials_quality(profile)
     if social_score >= 3:
         score += 2
         reasons.append("site + X + communauté")
     elif social_score == 2:
+        score += 1
+    elif social_score == 1 and v24 > 80_000:
         score += 1
 
     # Dex boosts
