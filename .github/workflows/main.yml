@@ -2,8 +2,7 @@ name: Crypto Scanner
 
 on:
   schedule:
-    # scan toutes les 10 minutes
-    - cron: "*/10 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
