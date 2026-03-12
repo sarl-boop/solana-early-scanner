@@ -465,6 +465,35 @@ def pumpfun_style(candidate):
 
     return "pump" in dex and mc < 300_000 and liq > 20_000
 
+
+def x_engine(candidate):
+    mc = candidate["market_cap"]
+    liq = candidate["liquidity"]
+    v5 = candidate["volume_5m"]
+    v1 = candidate["volume_1h"]
+    tx5 = candidate["tx_5m"]
+    tx1 = candidate["tx_1h"]
+    br5 = candidate["buy_ratio_5m"]
+
+    signals = 0
+
+    if 10_000 < mc < 200_000:
+        signals += 1
+
+    if liq / max(mc, 1) > 0.25:
+        signals += 1
+
+    if v1 > 0 and v5 * 12 > v1 * 0.35:
+        signals += 1
+
+    if tx1 > 0 and tx5 >= 12 and tx5 * 10 > tx1 * 0.25:
+        signals += 1
+
+    if br5 > 0.60:
+        signals += 1
+
+    return signals
+
 # =========================
 # SCORE
 # =========================
@@ -584,6 +613,15 @@ def compute_score(candidate, profile, boosted, takeovers):
     if pumpfun_style(candidate):
         score += 1
         reasons.append("pump.fun early")
+
+    # X-engine
+    x_signals = x_engine(candidate)
+    if x_signals >= 4:
+        score += 2
+        reasons.append("x-engine signals")
+    elif x_signals >= 3:
+        score += 1
+        reasons.append("x-engine momentum")
 
     return min(score, 10), reasons
 
