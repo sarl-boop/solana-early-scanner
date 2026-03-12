@@ -17,11 +17,12 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-# Logique "batch"
-BATCHES = 10                  # nombre de lots
-PAGES_PER_BATCH = 1           # 1 page Gecko par lot
-PAUSE_BETWEEN_BATCHES = 1.2   # pause entre lots
-RETRY_429_WAIT = 3.0          # pause si rate-limit
+# Batch agressif mais raisonnable pour GitHub
+BATCHES = 8
+PAGES_PER_BATCH = 1
+PAUSE_BETWEEN_BATCHES = 1.4
+RETRY_429_WAIT = 3.5
+
 MAX_ALERTS_PER_RUN = 4
 TIMEOUT = 15
 
@@ -146,7 +147,7 @@ def buy_ratio(bucket):
         return 0.5
 
 # =========================
-# HTTP HELPERS
+# HTTP
 # =========================
 
 def get_json(url: str, params=None, headers=None):
@@ -182,7 +183,7 @@ def get_json_with_429_retry(url: str, params=None, headers=None, retries=1):
             return None
 
 # =========================
-# DEXSCREENER ENRICHMENT
+# DEXSCREENER
 # =========================
 
 def fetch_dex_profiles():
@@ -247,14 +248,14 @@ def fetch_dex_boosts():
     return boosted
 
 # =========================
-# GECKOTERMINAL BATCH SCAN
+# GECKOTERMINAL BATCH
 # =========================
 
 def fetch_gecko_new_pools_batched():
     pools = []
     page = 1
 
-    for batch in range(BATCHES):
+    for _ in range(BATCHES):
         for _ in range(PAGES_PER_BATCH):
             data = get_json_with_429_retry(
                 GECKO_NEW_POOLS,
@@ -347,7 +348,6 @@ def fetch_gecko_new_pools_batched():
 
         time.sleep(PAUSE_BETWEEN_BATCHES)
 
-    # déduplication simple par adresse token
     dedup = {}
     for p in pools:
         addr = p["token_address"]
@@ -432,7 +432,7 @@ def compute_score(candidate, profile, boosted):
     score = 0
     reasons = []
 
-    # micro-cap plus agressif
+    # Micro-cap plus agressif
     if mc < 800_000:
         score += 3
         reasons.append("micro-cap basse")
@@ -442,7 +442,7 @@ def compute_score(candidate, profile, boosted):
     elif mc < 5_000_000:
         score += 1
 
-    # liquidité
+    # Liquidité
     liq_ratio = liq / max(mc, 1)
     if liq > 120_000:
         score += 2
@@ -457,7 +457,7 @@ def compute_score(candidate, profile, boosted):
     elif liq_ratio > 0.10:
         score += 1
 
-    # volume burst plus sensible
+    # Volume burst plus sensible
     burst = False
     if v1 > 0 and (v5 * 10) > (0.25 * v1) and tx5 >= 6:
         score += 2
@@ -473,14 +473,14 @@ def compute_score(candidate, profile, boosted):
     elif v24 > 80_000:
         score += 1
 
-    # buy pressure
+    # Buy pressure
     if br5 > 0.60:
         score += 2
         reasons.append("acheteurs dominants")
     elif br5 > 0.53:
         score += 1
 
-    # tx burst
+    # Transactions burst
     if tx5 >= 18:
         score += 2
     elif tx5 >= 8:
@@ -491,7 +491,7 @@ def compute_score(candidate, profile, boosted):
         if not burst:
             reasons.append("transactions accélèrent")
 
-    # socials
+    # Socials
     social_score = 0
     if profile:
         if profile.get("has_website"):
@@ -507,17 +507,17 @@ def compute_score(candidate, profile, boosted):
     elif social_score == 2:
         score += 1
 
-    # boost Dex
+    # Dex boosts
     if candidate["token_address"] in boosted:
         score += 1
         reasons.append("boost DexScreener")
 
-    # radar pump / launch
+    # Launchpad / pump-like
     if "pump" in candidate["dex_id"] or "launch" in candidate["dex_id"]:
         score += 1
         reasons.append("launchpad early")
 
-    # sweet spot d’âge
+    # Sweet spot d’âge
     if age is not None and 4 <= age <= 180:
         score += 1
 
