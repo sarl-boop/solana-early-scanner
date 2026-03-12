@@ -440,7 +440,57 @@ def rug_reject(candidate, profile):
 # SCORE
 # =========================
 
-def compute_score(candidate, profile, boosted, takeovers):
+def 
+# =========================
+# MOMENTUM RADAR
+# =========================
+
+def momentum_signal(candidate):
+    v5 = candidate["volume_5m"]
+    v1 = candidate["volume_1h"]
+
+    if v1 <= 0:
+        return False
+
+    if v5 * 12 > v1 * 0.30 and v5 > 6000:
+        return True
+
+    return False
+
+
+# =========================
+# HOLDER BURST RADAR
+# =========================
+
+def holder_burst(candidate):
+    tx5 = candidate["tx_5m"]
+    tx1 = candidate["tx_1h"]
+
+    if tx1 <= 0:
+        return False
+
+    if tx5 >= 10 and tx5 * 10 > tx1 * 0.25:
+        return True
+
+    return False
+
+
+# =========================
+# PUMPFUN STYLE RADAR
+# =========================
+
+def pumpfun_style(candidate):
+
+    dex = candidate["dex_id"]
+    mc = candidate["market_cap"]
+    liq = candidate["liquidity"]
+
+    if "pump" in dex and mc < 300000 and liq > 20000:
+        return True
+
+    return False
+    
+compute_score(candidate, profile, boosted, takeovers):
     mc = candidate["market_cap"]
     liq = candidate["liquidity"]
     v5 = candidate["volume_5m"]
@@ -542,6 +592,21 @@ def compute_score(candidate, profile, boosted, takeovers):
     # Sweet spot d’âge
     if age is not None and 4 <= age <= 180:
         score += 1
+        
+        # momentum radar
+if momentum_signal(candidate):
+    score += 1
+    reasons.append("momentum radar")
+
+# holder burst radar
+if holder_burst(candidate):
+    score += 1
+    reasons.append("holder burst")
+
+# pumpfun early radar
+if pumpfun_style(candidate):
+    score += 1
+    reasons.append("pump.fun early")
 
     return min(score, 10), reasons
 
