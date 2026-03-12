@@ -1,55 +1,74 @@
-import os
+import asyncio
 import json
+import os
 import time
 from pathlib import Path
-from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List
 
 import requests
+import websockets
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
-WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
-OWNED_TOKENS = {
-    x.strip() for x in os.environ.get("OWNED_TOKENS", "").split(",") if x.strip()
+SMART_WALLETS = {
+    x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
 
-STATE_FILE = Path("state.json")
+PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+DEX_TOKENS_API = "https://api.dexscreener.com/tokens/v1/solana/"
 
-BATCHES = 10
-PAGES_PER_BATCH = 1
-PAUSE_BETWEEN_BATCHES = 1.8
-RETRY_429_WAIT = 4.0
-
-MAX_ALERTS_PER_RUN = 4
-TIMEOUT = 15
-
-ALERT_COOLDOWN_HOURS = 12
-STATUS_INTERVAL_SECONDS = 3600
-SEEN_TTL_HOURS = 48
-
-GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
-DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
-DEX_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
-DEX_BOOSTS_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
-DEX_COMMUNITY_TAKEOVERS = "https://api.dexscreener.com/community-takeovers/latest/v1"
+STATE_FILE = Path("state_live.json")
 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
-# =========================
+MAX_MC = 5_000_000
+MIN_LIQ = 15_000
+ALERT_COOLDOWN_SECONDS = 12 * 3600
+NO_CHASE_MULTIPLIER = 3.0
+WASH_RATIO_LIMIT = 35.0
+EVALUATE_EVERY_SECONDS = 20
+SAVE_EVERY_SECONDS = 30
+
+# =========================================================
+# STATE
+# =========================================================
+
+STATE: Dict[str, Any] = {
+    "tokens": {},    # mint -> token state
+    "alerted": {},   # mint -> ts
+}
+
+# token state shape:
+# {
+#   "mint": str,
+#   "name": str,
+#   "symbol": str,
+#   "first_seen_ts": int,
+#   "first_seen_mc": float,
+#   "max_seen_mc": float,
+#   "last_seen_ts": int,
+#   "last_pair_url": str,
+#   "source": "new_token"|"migration",
+#   "trade": {
+#       "first_10_buyers": [],
+#       "buy_counts": {},
+#       "smart_wallet_hits": [],
+#   }
+# }
+
+# =========================================================
 # UTILS
-# =========================
+# =========================================================
 
-def send(msg: str) -> None:
-    try:
-        requests.post(WEBHOOK, json={"content": msg}, timeout=10)
-    except Exception as e:
-        print("Discord send error:", e)
+def now_ts() -> int:
+    return int(time.time())
 
 
-def to_float(v, default=0.0):
+def to_float(v, default=0.0) -> float:
     try:
         if v is None or v == "":
             return default
@@ -58,214 +77,111 @@ def to_float(v, default=0.0):
         return default
 
 
-def now_ts() -> int:
-    return int(time.time())
-
-
-def load_state():
-    default_state = {
-        "alerted": {},
-        "last_status_ts": 0,
-        "seen": {}
-    }
-
+def load_state() -> None:
+    global STATE
     if not STATE_FILE.exists():
-        return default_state
-
+        return
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return default_state
-
-        if "alerted" not in data or not isinstance(data["alerted"], dict):
-            data["alerted"] = {}
-        if "last_status_ts" not in data:
-            data["last_status_ts"] = 0
-        if "seen" not in data or not isinstance(data["seen"], dict):
-            data["seen"] = {}
-
-        return data
+        if isinstance(data, dict):
+            STATE = data
+            STATE.setdefault("tokens", {})
+            STATE.setdefault("alerted", {})
     except Exception as e:
-        print("State load error:", e)
-        return default_state
+        print("state load error:", e)
 
 
-def save_state(state):
+def save_state() -> None:
     try:
         STATE_FILE.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False),
+            json.dumps(STATE, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
     except Exception as e:
-        print("State save error:", e)
+        print("state save error:", e)
 
 
-def cleanup_old_alerts(state):
+def cleanup_state() -> None:
     now = now_ts()
-    keep = {}
-    for addr, ts in state["alerted"].items():
-        if now - ts < 7 * 24 * 3600:
-            keep[addr] = ts
-    state["alerted"] = keep
 
+    keep_alerted = {}
+    for mint, ts in STATE.get("alerted", {}).items():
+        if now - int(ts) < 7 * 24 * 3600:
+            keep_alerted[mint] = ts
+    STATE["alerted"] = keep_alerted
 
-def cleanup_old_seen(state):
-    now = now_ts()
-    keep = {}
-    for addr, rec in state["seen"].items():
-        if not isinstance(rec, dict):
-            continue
+    keep_tokens = {}
+    for mint, rec in STATE.get("tokens", {}).items():
         last_seen = int(rec.get("last_seen_ts", 0))
-        if now - last_seen < SEEN_TTL_HOURS * 3600:
-            keep[addr] = rec
-    state["seen"] = keep
+        if now - last_seen < 48 * 3600:
+            keep_tokens[mint] = rec
+    STATE["tokens"] = keep_tokens
 
 
-def recently_alerted(state, token_addr: str):
-    ts = state["alerted"].get(token_addr, 0)
-    return (time.time() - ts) < ALERT_COOLDOWN_HOURS * 3600
+def recently_alerted(mint: str) -> bool:
+    ts = int(STATE.get("alerted", {}).get(mint, 0))
+    return (now_ts() - ts) < ALERT_COOLDOWN_SECONDS
 
 
-def mark_alerted(state, token_addr: str):
-    state["alerted"][token_addr] = int(time.time())
+def mark_alerted(mint: str) -> None:
+    STATE["alerted"][mint] = now_ts()
 
 
-def parse_age_minutes(value):
-    if not value:
-        return None
-
+def send_discord(msg: str) -> None:
     try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 60.0)
-    except Exception:
-        pass
-
-    try:
-        ts = int(value)
-        if ts > 10_000_000_000:
-            ts = ts / 1000.0
-        return max(0.0, (time.time() - ts) / 60.0)
-    except Exception:
-        return None
-
-
-def tx_count(bucket):
-    if not isinstance(bucket, dict):
-        return 0
-    try:
-        return int(bucket.get("buys", 0)) + int(bucket.get("sells", 0))
-    except Exception:
-        return 0
-
-
-def buy_ratio(bucket):
-    if not isinstance(bucket, dict):
-        return 0.5
-    try:
-        buys = float(bucket.get("buys", 0))
-        sells = float(bucket.get("sells", 0))
-        total = buys + sells
-        if total <= 0:
-            return 0.5
-        return buys / total
-    except Exception:
-        return 0.5
-
-# =========================
-# HTTP
-# =========================
-
-def get_json(url: str, params=None, headers=None):
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
     except Exception as e:
-        print("GET error:", url, e)
-        return None
+        print("discord send error:", e)
 
 
-def get_json_with_429_retry(url: str, params=None, headers=None, retries=2):
-    for attempt in range(retries + 1):
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-
-            if r.status_code == 429:
-                print("429 rate limit on", url, "attempt", attempt + 1)
-                if attempt < retries:
-                    time.sleep(RETRY_429_WAIT)
-                    continue
-                return None
-
-            r.raise_for_status()
-            return r.json()
-
-        except Exception as e:
-            print("GET error:", url, e)
-            if attempt < retries:
-                time.sleep(1.0)
-                continue
-            return None
-
-# =========================
+# =========================================================
 # SOLANA RPC
-# =========================
+# =========================================================
 
-def rpc_call(method, params):
+def rpc_call(method: str, params: list) -> Optional[dict]:
     if not SOLANA_RPC_URL:
         return None
-
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params,
     }
-
     try:
-        r = requests.post(SOLANA_RPC_URL, json=payload, timeout=TIMEOUT)
+        r = requests.post(SOLANA_RPC_URL, json=payload, timeout=15)
         r.raise_for_status()
         data = r.json()
         return data.get("result")
     except Exception as e:
-        print("RPC error:", method, e)
+        print("rpc error:", method, e)
         return None
 
 
-def get_token_supply(mint_address):
-    result = rpc_call("getTokenSupply", [mint_address, {"commitment": "confirmed"}])
+def get_token_supply(mint: str) -> float:
+    result = rpc_call("getTokenSupply", [mint, {"commitment": "confirmed"}])
     if not result:
         return 0.0
-    value = result.get("value", {})
-    return to_float(value.get("uiAmount"), 0.0)
+    return to_float((result.get("value") or {}).get("uiAmount"), 0.0)
 
 
-def get_token_largest_accounts(mint_address):
-    result = rpc_call("getTokenLargestAccounts", [mint_address, {"commitment": "confirmed"}])
+def get_token_largest_accounts(mint: str) -> List[dict]:
+    result = rpc_call("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
     if not result:
         return []
     return result.get("value", []) or []
 
 
-def get_account_info(account_address):
+def get_account_info(address: str) -> Optional[dict]:
     result = rpc_call(
         "getAccountInfo",
-        [account_address, {"commitment": "confirmed", "encoding": "jsonParsed"}]
+        [address, {"commitment": "confirmed", "encoding": "jsonParsed"}],
     )
     if not result:
         return None
     return result.get("value")
 
 
-def classify_top_holder_account(account_info):
-    """
-    Heuristique prudente :
-    - if owner != token program => private / unknown
-    - if parsed token account exists => token account
-    - cannot perfectly prove AMM pool from RPC alone, so we classify:
-      token account + no obvious private owner field => probable_pool_like
-      otherwise unknown/private
-    """
+def classify_top_account(account_info: Optional[dict]) -> str:
     if not account_info:
         return "unknown"
 
@@ -277,860 +193,477 @@ def classify_top_holder_account(account_info):
     if isinstance(data, dict):
         parsed = data.get("parsed", {})
         info = parsed.get("info", {})
-        token_amount = info.get("tokenAmount")
-        if token_amount is not None:
-            # token account, often pool-like but not guaranteed
+        if info.get("tokenAmount") is not None:
             return "token_account"
 
     return "private_or_unknown"
 
 
-def get_holder_concentration(mint_address):
-    """
-    Returns:
-      {
-        enabled: bool,
-        supply: float,
-        top1_pct: float,
-        top3_pct: float,
-        holder_count_sample: int,
-        top1_kind: str,
-        hard_reject: bool,
-        soft_penalty: bool,
-      }
-    """
+def get_holder_stats(mint: str) -> dict:
     if not SOLANA_RPC_URL:
         return {
             "enabled": False,
-            "supply": 0.0,
             "top1_pct": 0.0,
             "top3_pct": 0.0,
-            "holder_count_sample": 0,
             "top1_kind": "unknown",
             "hard_reject": False,
             "soft_penalty": False,
         }
 
-    supply = get_token_supply(mint_address)
-    largest = get_token_largest_accounts(mint_address)
-
-    if not largest or supply <= 0:
+    supply = get_token_supply(mint)
+    largest = get_token_largest_accounts(mint)
+    if supply <= 0 or not largest:
         return {
             "enabled": False,
-            "supply": supply,
             "top1_pct": 0.0,
             "top3_pct": 0.0,
-            "holder_count_sample": len(largest),
             "top1_kind": "unknown",
             "hard_reject": False,
             "soft_penalty": False,
         }
 
-    top_ui = [to_float(x.get("uiAmount"), 0.0) for x in largest[:3]]
-    top1_pct = top_ui[0] / supply if len(top_ui) >= 1 and supply > 0 else 0.0
-    top3_pct = sum(top_ui[:3]) / supply if supply > 0 else 0.0
+    top_amounts = [to_float(x.get("uiAmount"), 0.0) for x in largest[:3]]
+    top1_pct = top_amounts[0] / supply if top_amounts else 0.0
+    top3_pct = sum(top_amounts) / supply if supply > 0 else 0.0
 
     top1_addr = largest[0].get("address", "")
     top1_info = get_account_info(top1_addr) if top1_addr else None
-    top1_kind = classify_top_holder_account(top1_info)
+    top1_kind = classify_top_account(top1_info)
 
     hard_reject = False
     soft_penalty = False
 
-    # hard reject if clearly concentrated outside probable pool-like conditions
-    if top1_kind != "token_account" and top1_pct > 0.40:
+    # Anti dev wallet / concentration
+    if top1_kind != "token_account" and top1_pct > 0.20:
+        hard_reject = True
+    if top1_kind != "token_account" and top3_pct > 0.40:
         hard_reject = True
 
-    if top1_kind != "token_account" and top3_pct > 0.70:
-        hard_reject = True
-
-    # even token_account can still be suspicious if concentration is extreme
-    if top1_kind == "token_account" and top3_pct > 0.92:
-        soft_penalty = True
-
+    # Even if token-account-like, extreme concentration is still suspicious
     if top1_kind == "token_account" and top1_pct > 0.88:
+        soft_penalty = True
+    if top1_kind == "token_account" and top3_pct > 0.95:
         soft_penalty = True
 
     return {
         "enabled": True,
-        "supply": supply,
         "top1_pct": top1_pct,
         "top3_pct": top3_pct,
-        "holder_count_sample": len(largest),
         "top1_kind": top1_kind,
         "hard_reject": hard_reject,
         "soft_penalty": soft_penalty,
     }
 
-# =========================
+
+# =========================================================
 # DEXSCREENER
-# =========================
+# =========================================================
 
-def fetch_dex_profiles():
-    out = {}
-    data = get_json(DEX_PROFILES)
-    if not isinstance(data, list):
-        return out
+def get_best_pair_for_token(mint: str) -> Optional[dict]:
+    try:
+        r = requests.get(DEX_TOKENS_API + mint, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            return None
 
-    for item in data:
-        if item.get("chainId") != "solana":
-            continue
+        # Keep Solana pairs only, choose highest liquidity
+        candidates = [p for p in data if p.get("chainId") == "solana"]
+        if not candidates:
+            return None
 
-        addr = item.get("tokenAddress")
-        if not addr:
-            continue
-
-        links = item.get("links", []) or []
-
-        has_website = False
-        has_x = False
-        has_discord = False
-        has_telegram = False
-
-        for link in links:
-            label = str(link.get("label", "")).lower()
-            url = str(link.get("url", "")).lower()
-            combo = f"{label} {url}"
-
-            if "website" in combo or "site" in combo:
-                has_website = True
-            if "twitter" in combo or "x.com" in combo:
-                has_x = True
-            if "discord" in combo:
-                has_discord = True
-            if "telegram" in combo or "t.me" in combo:
-                has_telegram = True
-
-        out[addr] = {
-            "has_website": has_website,
-            "has_x": has_x,
-            "has_discord": has_discord,
-            "has_telegram": has_telegram,
-        }
-
-    return out
+        candidates.sort(
+            key=lambda x: to_float((x.get("liquidity") or {}).get("usd"), 0.0),
+            reverse=True,
+        )
+        return candidates[0]
+    except Exception as e:
+        print("dex fetch error:", mint, e)
+        return None
 
 
-def fetch_dex_boosts():
-    boosted = set()
+# =========================================================
+# TOKEN STATE
+# =========================================================
 
-    for url in (DEX_BOOSTS_LATEST, DEX_BOOSTS_TOP):
-        data = get_json(url)
-        if not isinstance(data, list):
-            continue
+def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "") -> dict:
+    rec = STATE["tokens"].get(mint)
+    if rec:
+        if name and not rec.get("name"):
+            rec["name"] = name
+        if symbol and not rec.get("symbol"):
+            rec["symbol"] = symbol
+        if source and not rec.get("source"):
+            rec["source"] = source
+        rec["last_seen_ts"] = now_ts()
+        return rec
 
-        for item in data:
-            if item.get("chainId") == "solana":
-                addr = item.get("tokenAddress")
-                if addr:
-                    boosted.add(addr)
-
-    return boosted
-
-
-def fetch_dex_community_takeovers():
-    takeover = set()
-    data = get_json(DEX_COMMUNITY_TAKEOVERS)
-    if not isinstance(data, list):
-        return takeover
-
-    for item in data:
-        if item.get("chainId") == "solana":
-            addr = item.get("tokenAddress")
-            if addr:
-                takeover.add(addr)
-
-    return takeover
-
-# =========================
-# GECKOTERMINAL
-# =========================
-
-def fetch_gecko_new_pools_batched():
-    pools = []
-    page = 1
-    raw_count = 0
-
-    for _ in range(BATCHES):
-        for _ in range(PAGES_PER_BATCH):
-            data = get_json_with_429_retry(
-                GECKO_NEW_POOLS,
-                params={"page": page, "include": "base_token,dex"},
-                headers={"accept": "application/json"},
-                retries=2,
-            )
-
-            if data and "data" in data:
-                included = data.get("included", []) or []
-                inc_map = {}
-                for obj in included:
-                    inc_map[(obj.get("type"), obj.get("id"))] = obj
-
-                for pool in data.get("data", []):
-                    raw_count += 1
-
-                    attrs = pool.get("attributes", {}) or {}
-                    rels = pool.get("relationships", {}) or {}
-
-                    base_ref = (((rels.get("base_token") or {}).get("data")) or {})
-                    dex_ref = (((rels.get("dex") or {}).get("data")) or {})
-
-                    base_obj = inc_map.get((base_ref.get("type"), base_ref.get("id")), {})
-                    dex_obj = inc_map.get((dex_ref.get("type"), dex_ref.get("id")), {})
-
-                    base_attrs = base_obj.get("attributes", {}) or {}
-                    dex_attrs = dex_obj.get("attributes", {}) or {}
-
-                    token_addr = (
-                        base_attrs.get("address")
-                        or attrs.get("base_token_address")
-                        or ""
-                    )
-
-                    name = (
-                        base_attrs.get("name")
-                        or attrs.get("name", "").split("/")[0].strip()
-                        or "Unknown Token"
-                    )
-
-                    symbol = (
-                        base_attrs.get("symbol")
-                        or name
-                    )
-
-                    dex_id = (
-                        dex_attrs.get("identifier")
-                        or dex_attrs.get("name")
-                        or ""
-                    ).lower()
-
-                    market_cap = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
-                    fdv = to_float(attrs.get("fdv_usd"))
-                    liquidity = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
-
-                    volume_map = attrs.get("volume_usd", {}) or {}
-                    tx_map = attrs.get("transactions", {}) or {}
-
-                    volume_5m = to_float(volume_map.get("m5"))
-                    volume_1h = to_float(volume_map.get("h1"))
-                    volume_24h = to_float(volume_map.get("h24"))
-
-                    tx_5m = tx_count(tx_map.get("m5"))
-                    tx_1h = tx_count(tx_map.get("h1"))
-
-                    buy_ratio_5m = buy_ratio(tx_map.get("m5"))
-                    buy_ratio_1h = buy_ratio(tx_map.get("h1"))
-
-                    age_min = parse_age_minutes(
-                        attrs.get("pool_created_at")
-                        or attrs.get("created_at")
-                    )
-
-                    pools.append({
-                        "name": name,
-                        "symbol": symbol,
-                        "token_address": token_addr,
-                        "dex_id": dex_id,
-                        "market_cap": market_cap,
-                        "fdv": fdv,
-                        "liquidity": liquidity,
-                        "volume_5m": volume_5m,
-                        "volume_1h": volume_1h,
-                        "volume_24h": volume_24h,
-                        "tx_5m": tx_5m,
-                        "tx_1h": tx_1h,
-                        "buy_ratio_5m": buy_ratio_5m,
-                        "buy_ratio_1h": buy_ratio_1h,
-                        "age_min": age_min,
-                    })
-
-            page += 1
-
-        time.sleep(PAUSE_BETWEEN_BATCHES)
-
-    dedup = {}
-    for p in pools:
-        addr = p["token_address"]
-        if addr and addr not in dedup:
-            dedup[addr] = p
-
-    print(f"Raw pools fetched: {raw_count}")
-    return list(dedup.values())
-
-# =========================
-# FILTERS
-# =========================
-
-def socials_quality(profile):
-    if not profile:
-        return 0
-    score = 0
-    if profile.get("has_website"):
-        score += 1
-    if profile.get("has_x"):
-        score += 1
-    if profile.get("has_discord") or profile.get("has_telegram"):
-        score += 1
-    return score
+    rec = {
+        "mint": mint,
+        "name": name or mint[:6],
+        "symbol": symbol or "",
+        "source": source or "unknown",
+        "first_seen_ts": now_ts(),
+        "first_seen_mc": 0.0,
+        "max_seen_mc": 0.0,
+        "last_seen_ts": now_ts(),
+        "last_pair_url": "",
+        "trade": {
+            "first_10_buyers": [],
+            "buy_counts": {},
+            "smart_wallet_hits": [],
+        },
+    }
+    STATE["tokens"][mint] = rec
+    return rec
 
 
-def wash_trading_risk(candidate):
-    liq = candidate["liquidity"]
-    v24 = candidate["volume_24h"]
-    tx5 = candidate["tx_5m"]
-    age = candidate["age_min"]
+def update_trade_state(mint: str, buyer: Optional[str], side: str) -> None:
+    rec = ensure_token(mint)
+    trade = rec["trade"]
 
+    if side != "buy" or not buyer:
+        return
+
+    if len(trade["first_10_buyers"]) < 10:
+        trade["first_10_buyers"].append(buyer)
+
+    counts = trade["buy_counts"]
+    counts[buyer] = counts.get(buyer, 0) + 1
+
+
+def add_smart_wallet_hit(mint: str, wallet: str) -> None:
+    rec = ensure_token(mint)
+    hits = set(rec["trade"].get("smart_wallet_hits", []))
+    hits.add(wallet)
+    rec["trade"]["smart_wallet_hits"] = list(hits)
+
+
+# =========================================================
+# FILTERS / SCORE
+# =========================================================
+
+def sniper_pattern_reject(token_state: dict) -> bool:
+    first_10 = token_state["trade"].get("first_10_buyers", [])
+    counts = token_state["trade"].get("buy_counts", {})
+    if len(first_10) < 5:
+        return False
+    if not counts:
+        return False
+    max_count = max(counts.values())
+    return max_count > 2
+
+
+def fake_liquidity_reject(mc: float, liq: float) -> bool:
+    return mc > 0 and liq < 0.5 * mc
+
+
+def wash_trading_reject(v24: float, liq: float) -> bool:
     if liq <= 0:
         return False
-
-    vol_liq_ratio = v24 / liq
-
-    if vol_liq_ratio > 35:
-        return True
-
-    if age is not None and age <= 20 and liq < 25_000 and tx5 > 45:
-        return True
-
-    return False
+    return (v24 / liq) > WASH_RATIO_LIMIT
 
 
-def fragile_pool_risk(candidate):
-    liq = candidate["liquidity"]
-    tx5 = candidate["tx_5m"]
-    v5 = candidate["volume_5m"]
-    return liq < 30_000 and (tx5 > 40 or v5 > 20_000)
-
-
-def unknown_mcap_risk(candidate):
-    mc = candidate["market_cap"]
-    fdv = candidate["fdv"]
-    return mc <= 0 and fdv <= 0
-
-
-def rug_reject(candidate, profile, holder_stats):
-    mc = candidate["market_cap"]
-    fdv = candidate["fdv"]
-    liq = candidate["liquidity"]
-    v24 = candidate["volume_24h"]
-    v5 = candidate["volume_5m"]
-    tx5 = candidate["tx_5m"]
-    br5 = candidate["buy_ratio_5m"]
-    age = candidate["age_min"]
-
-    effective_mc = mc if mc > 0 else fdv
-
-    if not candidate["token_address"]:
-        return True
-
-    if unknown_mcap_risk(candidate):
-        return True
-
-    if effective_mc <= 0 or effective_mc > 5_000_000:
-        return True
-
-    if liq < 15_000:
-        return True
-
-    if liq / max(effective_mc, 1) < 0.04:
-        return True
-
-    if age is not None and age < 1:
-        return True
-
-    if age is not None and age > 720:
-        return True
-
-    if v24 < 15_000:
-        return True
-
-    if tx5 < 4 and v5 < 2_000:
-        return True
-
-    if br5 < 0.45:
-        return True
-
-    if socials_quality(profile) == 0 and (v24 < 40_000 or tx5 < 8):
-        return True
-
-    if wash_trading_risk(candidate):
-        return True
-
-    if fragile_pool_risk(candidate):
-        return True
-
-    if holder_stats.get("hard_reject", False):
-        return True
-
-    return False
-
-# =========================
-# RADARS
-# =========================
-
-def momentum_signal(candidate):
-    v5 = candidate["volume_5m"]
-    v1 = candidate["volume_1h"]
-
-    if v1 <= 0:
+def no_chase_reject(first_seen_mc: float, current_mc: float, age_min: float) -> bool:
+    if first_seen_mc <= 0:
         return False
-
-    return v5 * 12 > v1 * 0.30 and v5 > 6000
-
-
-def holder_burst(candidate):
-    tx5 = candidate["tx_5m"]
-    tx1 = candidate["tx_1h"]
-
-    if tx1 <= 0:
+    if age_min <= 10:
         return False
-
-    return tx5 >= 10 and tx5 * 10 > tx1 * 0.25
-
-
-def pumpfun_style(candidate):
-    dex = candidate["dex_id"]
-    mc = candidate["market_cap"]
-    fdv = candidate["fdv"]
-    liq = candidate["liquidity"]
-
-    effective_mc = mc if mc > 0 else fdv
-    return "pump" in dex and effective_mc < 300_000 and liq > 20_000
+    return current_mc > first_seen_mc * NO_CHASE_MULTIPLIER
 
 
-def x_engine(candidate):
-    mc = candidate["market_cap"]
-    fdv = candidate["fdv"]
-    liq = candidate["liquidity"]
-    v5 = candidate["volume_5m"]
-    v1 = candidate["volume_1h"]
-    tx5 = candidate["tx_5m"]
-    tx1 = candidate["tx_1h"]
-    br5 = candidate["buy_ratio_5m"]
+def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, List[str]):
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    v5 = to_float((pair.get("volume") or {}).get("m5"), 0.0)
+    v1 = to_float((pair.get("volume") or {}).get("h1"), 0.0)
+    v24 = to_float((pair.get("volume") or {}).get("h24"), 0.0)
 
-    effective_mc = mc if mc > 0 else fdv
-    signals = 0
+    tx5 = pair.get("txns", {}).get("m5", {}) or {}
+    buys = int(tx5.get("buys", 0))
+    sells = int(tx5.get("sells", 0))
+    total = buys + sells
+    buy_ratio = buys / total if total > 0 else 0.5
 
-    if 10_000 < effective_mc < 200_000:
-        signals += 1
-
-    if liq / max(effective_mc, 1) > 0.25:
-        signals += 1
-
-    if v1 > 0 and v5 * 12 > v1 * 0.35:
-        signals += 1
-
-    if tx1 > 0 and tx5 >= 12 and tx5 * 10 > tx1 * 0.25:
-        signals += 1
-
-    if br5 > 0.60:
-        signals += 1
-
-    return signals
-
-
-def update_seen_record(state, candidate):
-    addr = candidate["token_address"]
-    now = now_ts()
-
-    effective_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
-
-    rec = state["seen"].get(addr, {})
-    if not isinstance(rec, dict):
-        rec = {}
-
-    first_seen_ts = int(rec.get("first_seen_ts", now))
-    first_seen_mc = to_float(rec.get("first_seen_mc"), effective_mc)
-
-    max_mc = max(to_float(rec.get("max_mc"), effective_mc), effective_mc)
-    prev_v5 = to_float(rec.get("last_v5"), candidate["volume_5m"])
-    prev_tx5 = int(rec.get("last_tx5", candidate["tx_5m"]))
-    prev_mc = to_float(rec.get("last_mc"), effective_mc)
-
-    new_rec = {
-        "first_seen_ts": first_seen_ts,
-        "first_seen_mc": first_seen_mc,
-        "last_seen_ts": now,
-        "last_mc": effective_mc,
-        "last_v5": candidate["volume_5m"],
-        "last_tx5": candidate["tx_5m"],
-        "prev_mc": prev_mc,
-        "prev_v5": prev_v5,
-        "prev_tx5": prev_tx5,
-        "max_mc": max_mc,
-    }
-
-    state["seen"][addr] = new_rec
-    return new_rec
-
-
-def no_chase_filter(candidate, seen):
-    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
-    age = candidate["age_min"]
-
-    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
-    max_mc = to_float(seen.get("max_mc"), current_mc)
-
-    if age is not None and age > 15 and first_mc > 0 and current_mc > first_mc * 2.4:
-        return True
-
-    if max_mc > 0 and current_mc >= max_mc * 0.98 and first_mc > 0 and max_mc > first_mc * 2.8:
-        return True
-
-    return False
-
-
-def early_base_signal(candidate, seen):
-    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
-    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
-    age = candidate["age_min"]
-    br5 = candidate["buy_ratio_5m"]
-
-    if first_mc <= 0:
-        return False
-
-    return (
-        age is not None
-        and age <= 20
-        and current_mc <= first_mc * 1.35
-        and br5 > 0.55
-        and candidate["volume_5m"] > 6000
-    )
-
-
-def second_wave_signal(candidate, seen):
-    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
-    br5 = candidate["buy_ratio_5m"]
-    v5 = candidate["volume_5m"]
-    tx5 = candidate["tx_5m"]
-
-    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
-    prev_v5 = to_float(seen.get("prev_v5"), v5)
-    prev_tx5 = int(seen.get("prev_tx5", tx5))
-    max_mc = to_float(seen.get("max_mc"), current_mc)
-
-    if first_mc <= 0 or max_mc <= 0:
-        return False
-
-    return (
-        max_mc > first_mc * 1.25
-        and current_mc < max_mc * 0.92
-        and current_mc > first_mc * 1.05
-        and v5 > max(prev_v5 * 1.5, 8000)
-        and tx5 >= max(prev_tx5 + 3, 8)
-        and br5 > 0.56
-    )
-
-# =========================
-# SCORE
-# =========================
-
-def compute_score(candidate, profile, boosted, takeovers, seen, holder_stats):
-    mc = candidate["market_cap"]
-    fdv = candidate["fdv"]
-    liq = candidate["liquidity"]
-    v5 = candidate["volume_5m"]
-    v1 = candidate["volume_1h"]
-    v24 = candidate["volume_24h"]
-    tx5 = candidate["tx_5m"]
-    tx1 = candidate["tx_1h"]
-    br5 = candidate["buy_ratio_5m"]
-    age = candidate["age_min"]
-    token_addr = candidate["token_address"]
-
-    effective_mc = mc if mc > 0 else fdv
+    age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
 
     score = 0
     reasons = []
 
-    # Micro-cap
-    if effective_mc < 800_000:
-        score += 3
+    if mc < 50_000:
+        score += 2
         reasons.append("micro-cap basse")
-    elif effective_mc < 2_000_000:
-        score += 2
-        reasons.append("micro-cap correcte")
-    elif effective_mc < 5_000_000:
+    elif mc < 200_000:
         score += 1
 
-    # Liquidité
-    liq_ratio = liq / max(effective_mc, 1)
-    if liq > 120_000:
+    if liq >= mc * 0.7:
         score += 2
-        reasons.append("bonne liquidité")
-    elif liq > 60_000:
-        score += 1
-        reasons.append("liquidité correcte")
-
-    if liq_ratio > 0.20:
-        score += 2
-        reasons.append("liquidité forte vs market cap")
-    elif liq_ratio > 0.10:
+        reasons.append("liquidité forte")
+    elif liq >= mc * 0.5:
         score += 1
 
-    # Volume burst
-    burst = False
-    if v1 > 0 and (v5 * 10) > (0.25 * v1) and tx5 >= 6:
+    if v1 > 0 and v5 * 12 > v1 * 0.30 and v5 > 5_000:
         score += 2
         reasons.append("volume 5m accélère")
-        burst = True
-    elif v5 > 8_000 and tx5 >= 6:
-        score += 1
-        reasons.append("activité 5m monte")
-
-    if v24 > 250_000:
-        score += 2
-        reasons.append("volume 24h solide")
-    elif v24 > 80_000:
+    elif v5 > 8_000:
         score += 1
 
-    # Buy pressure
-    if br5 > 0.60:
-        score += 2
+    if buys > sells:
+        score += 1
         reasons.append("acheteurs dominants")
-    elif br5 > 0.53:
+
+    if buy_ratio > 0.60:
         score += 1
 
-    # Transactions burst
-    if tx5 >= 18:
+    if buys >= 10:
+        score += 1
+
+    if token_state["trade"].get("smart_wallet_hits"):
         score += 2
-    elif tx5 >= 8:
-        score += 1
+        reasons.append("smart wallet")
 
-    if tx1 > 0 and tx5 > 0 and tx5 * 12 > 0.20 * tx1:
-        score += 1
-        if not burst:
-            reasons.append("transactions accélèrent")
-
-    # Socials
-    social_score = socials_quality(profile)
-    if social_score >= 3:
-        score += 2
-        reasons.append("site + X + communauté")
-    elif social_score == 2:
-        score += 1
-    elif social_score == 1 and v24 > 80_000:
-        score += 1
-
-    # Dex boosts
-    if token_addr in boosted:
-        score += 1
-        reasons.append("boost DexScreener")
-
-    # Community takeover
-    if token_addr in takeovers:
-        score += 1
-        reasons.append("community takeover")
-
-    # Launchpad / pump-like
-    if "pump" in candidate["dex_id"] or "launch" in candidate["dex_id"]:
-        score += 1
-        reasons.append("launchpad early")
-
-    # Sweet spot d’âge
-    if age is not None and 2 <= age <= 180:
-        score += 1
-
-    # V4/V5/V6
-    if momentum_signal(candidate):
-        score += 1
-        reasons.append("momentum radar")
-
-    if holder_burst(candidate):
-        score += 1
-        reasons.append("holder burst")
-
-    if pumpfun_style(candidate):
-        score += 1
-        reasons.append("pump.fun early")
-
-    x_signals = x_engine(candidate)
-    if x_signals >= 4:
-        score += 2
-        reasons.append("x-engine signals")
-    elif x_signals >= 3:
-        score += 1
-        reasons.append("x-engine momentum")
-
-    if early_base_signal(candidate, seen):
-        score += 1
-        reasons.append("early base")
-
-    if second_wave_signal(candidate, seen):
-        score += 2
-        reasons.append("second wave")
-
-    # V8 holder intelligence
     if holder_stats.get("enabled"):
-        top1_pct = holder_stats.get("top1_pct", 0.0)
-        top3_pct = holder_stats.get("top3_pct", 0.0)
-        top1_kind = holder_stats.get("top1_kind", "unknown")
-
-        if top1_kind == "token_account":
+        if holder_stats["top1_kind"] == "token_account":
             reasons.append("top1 pool-like")
-        if top1_pct < 0.20:
+        if holder_stats["top1_pct"] < 0.10 and holder_stats["top3_pct"] < 0.25:
             score += 1
             reasons.append("distribution saine")
-        elif top1_pct > 0.50 and top1_kind != "token_account":
-            score -= 3
-            reasons.append("top1 concentré")
-        elif top3_pct > 0.75 and top1_kind != "token_account":
-            score -= 2
-            reasons.append("top3 concentré")
-        elif holder_stats.get("soft_penalty", False):
+        if holder_stats.get("soft_penalty"):
             score -= 1
             reasons.append("concentration élevée")
 
-    # anti-trap penalties
-    if wash_trading_risk(candidate):
+    if age_min <= 5:
+        score += 1
+
+    if wash_trading_reject(v24, liq):
         score -= 3
-        reasons.append("wash-trading risk")
+        reasons.append("wash risk")
 
-    if fragile_pool_risk(candidate):
-        score -= 2
-        reasons.append("fragile pool")
-
-    if candidate["market_cap"] <= 0 and candidate["fdv"] > 0:
-        score -= 1
-        reasons.append("mcap incertaine")
-
-    return max(0, min(score, 10)), reasons
+    return max(0, min(10, score)), reasons
 
 
-def classify_buy(score, candidate, seen, holder_stats):
-    if no_chase_filter(candidate, seen):
-        return None, None
+def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, reasons: List[str], action: str) -> str:
+    mint = token_state["mint"]
+    name = token_state.get("name") or (pair.get("baseToken") or {}).get("name") or mint[:6]
+    mc = int(to_float(pair.get("marketCap") or pair.get("fdv"), 0.0))
+    liq = int(to_float((pair.get("liquidity") or {}).get("usd"), 0.0))
+    age_min = int(max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0))
+    pair_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
-    if holder_stats.get("hard_reject", False):
-        return None, None
-
-    if score >= 9:
-        return "🟡 GOLD", "Buy 50€ maintenant"
-    if score >= 7:
-        return "🟢 GREEN", "Buy 25€ maintenant"
-    return None, None
-
-
-def classify_sell(candidate):
-    liq = candidate["liquidity"]
-    v5 = candidate["volume_5m"]
-    br5 = candidate["buy_ratio_5m"]
-
-    if liq < 10_000 or (v5 < 3_000 and br5 < 0.35):
-        return "🔴 RED", "Sell"
-    return None, None
-
-# =========================
-# MESSAGE
-# =========================
-
-def build_message(color, candidate, score, reasons, action, seen, holder_stats):
-    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
-    mc = int(current_mc)
-    liq = int(candidate["liquidity"])
-    first_mc = int(to_float(seen.get("first_seen_mc"), current_mc))
-    max_mc = int(to_float(seen.get("max_mc"), current_mc))
-
-    age = "?"
-    if candidate["age_min"] is not None:
-        age = f"{int(candidate['age_min'])} min"
-
-    extras = []
+    extra = ""
     if holder_stats.get("enabled"):
-        extras.append(f"Top1: {holder_stats.get('top1_pct', 0.0) * 100:.1f}%")
-        extras.append(f"Top3: {holder_stats.get('top3_pct', 0.0) * 100:.1f}%")
-        extras.append(f"Top1 kind: {holder_stats.get('top1_kind', 'unknown')}")
+        extra = (
+            f"Top1: {holder_stats['top1_pct'] * 100:.1f}%\n"
+            f"Top3: {holder_stats['top3_pct'] * 100:.1f}%\n"
+            f"Top1 kind: {holder_stats['top1_kind']}\n"
+        )
 
-    reason = " + ".join(reasons[:4]) if reasons else "signal confirmé"
-    extra_text = "\n".join(extras)
+    reason_text = " + ".join(reasons[:4]) if reasons else "signal confirmé"
+
+    color = "🟡 GOLD" if score >= 8 else "🟢 GREEN"
 
     return (
         f"{color}\n\n"
-        f"Token name: {candidate['name']}\n"
+        f"Token name: {name}\n"
         f"Score: {score}/10\n"
         f"Color: {color}\n"
         f"Market cap: ${mc:,}\n"
         f"Liquidity: ${liq:,}\n"
-        f"First seen MC: ${first_mc:,}\n"
-        f"Max seen MC: ${max_mc:,}\n"
-        f"Reason: {reason}\n"
-        f"Age: {age}\n"
-        f"{extra_text}\n"
-        f"Dex: https://dexscreener.com/solana/{candidate['token_address']}\n\n"
+        f"First seen MC: ${int(token_state.get('first_seen_mc', mc)):,}\n"
+        f"Max seen MC: ${int(token_state.get('max_seen_mc', mc)):,}\n"
+        f"Reason: {reason_text}\n"
+        f"Age: {age_min} min\n"
+        f"{extra}"
+        f"Dex: {pair_url}\n\n"
         f"Action: {action}"
     ).strip()
 
-# =========================
-# MAIN
-# =========================
 
-def main():
-    state = load_state()
-    cleanup_old_alerts(state)
-    cleanup_old_seen(state)
+# =========================================================
+# EVALUATION
+# =========================================================
 
-    profiles = fetch_dex_profiles()
-    boosted = fetch_dex_boosts()
-    takeovers = fetch_dex_community_takeovers()
-    pools = fetch_gecko_new_pools_batched()
+def evaluate_token(mint: str) -> None:
+    token_state = STATE["tokens"].get(mint)
+    if not token_state:
+        return
 
-    print(f"Checked {len(pools)} pools")
-    print(f"Dex community takeovers: {len(takeovers)}")
-    print(f"RPC holder radar enabled: {bool(SOLANA_RPC_URL)}")
+    pair = get_best_pair_for_token(mint)
+    if not pair:
+        return
 
-    alerts = []
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    v24 = to_float((pair.get("volume") or {}).get("h24"), 0.0)
+    age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
 
-    for candidate in pools:
-        token_addr = candidate["token_address"]
-        profile = profiles.get(token_addr, {})
-        seen = update_seen_record(state, candidate)
+    token_state["last_pair_url"] = pair.get("url") or ""
+    token_state["last_seen_ts"] = now_ts()
 
-        holder_stats = get_holder_concentration(token_addr)
+    if token_state["first_seen_mc"] <= 0 and mc > 0:
+        token_state["first_seen_mc"] = mc
+    token_state["max_seen_mc"] = max(token_state.get("max_seen_mc", 0.0), mc)
 
-        if rug_reject(candidate, profile, holder_stats):
-            continue
+    # Basic gates
+    if mc <= 0 or mc > MAX_MC:
+        return
+    if liq < MIN_LIQ:
+        return
+    if age_min < 1:
+        return
 
-        score, reasons = compute_score(candidate, profile, boosted, takeovers, seen, holder_stats)
+    # Traps
+    if fake_liquidity_reject(mc, liq):
+        return
+    if wash_trading_reject(v24, liq):
+        return
+    if sniper_pattern_reject(token_state):
+        return
+    if no_chase_reject(token_state.get("first_seen_mc", 0.0), mc, age_min):
+        return
 
-        buy_color, buy_action = classify_buy(score, candidate, seen, holder_stats)
-        if buy_color and not recently_alerted(state, token_addr):
-            alerts.append(
-                (
-                    score,
-                    build_message(buy_color, candidate, score, reasons, buy_action, seen, holder_stats),
-                    token_addr
-                )
-            )
-            continue
+    holder_stats = get_holder_stats(mint)
+    if holder_stats.get("hard_reject", False):
+        return
 
-        if token_addr in OWNED_TOKENS:
-            sell_color, sell_action = classify_sell(candidate)
-            if sell_color and not recently_alerted(state, token_addr):
-                alerts.append(
-                    (
-                        score,
-                        build_message(sell_color, candidate, score, reasons, sell_action, seen, holder_stats),
-                        token_addr
-                    )
-                )
+    score, reasons = compute_score(pair, token_state, holder_stats)
 
-    alerts.sort(key=lambda x: x[0], reverse=True)
+    if score >= 8 and not recently_alerted(mint):
+        msg = build_alert(pair, token_state, holder_stats, score, reasons, "Buy 50€ maintenant")
+        send_discord(msg)
+        mark_alerted(mint)
+    elif score >= 6 and not recently_alerted(mint):
+        msg = build_alert(pair, token_state, holder_stats, score, reasons, "Buy 25€ maintenant")
+        send_discord(msg)
+        mark_alerted(mint)
 
-    if alerts:
-        sent = 0
-        for _, msg, token_addr in alerts:
-            send(msg)
-            mark_alerted(state, token_addr)
-            sent += 1
-            if sent >= MAX_ALERTS_PER_RUN:
-                break
-    else:
-        now = now_ts()
-        if now - state.get("last_status_ts", 0) >= STATUS_INTERVAL_SECONDS:
-            send(f"🤖 SCANNER ACTIVE — No signals detected | Checked {len(pools)} pools")
-            state["last_status_ts"] = now
 
-    save_state(state)
+# =========================================================
+# PUMPPORTAL MESSAGE PARSING
+# =========================================================
+
+def extract_mint(msg: dict) -> Optional[str]:
+    return (
+        msg.get("mint")
+        or msg.get("token")
+        or msg.get("tokenAddress")
+        or msg.get("baseTokenAddress")
+    )
+
+
+def extract_name(msg: dict) -> str:
+    return msg.get("name") or msg.get("tokenName") or ""
+
+
+def extract_symbol(msg: dict) -> str:
+    return msg.get("symbol") or msg.get("tokenSymbol") or ""
+
+
+def extract_wallet(msg: dict) -> Optional[str]:
+    return (
+        msg.get("traderPublicKey")
+        or msg.get("account")
+        or msg.get("wallet")
+        or msg.get("maker")
+    )
+
+
+def extract_side(msg: dict) -> str:
+    side = str(msg.get("txType") or msg.get("side") or msg.get("type") or "").lower()
+    if "buy" in side:
+        return "buy"
+    if "sell" in side:
+        return "sell"
+    return ""
+
+
+# =========================================================
+# LIVE SCANNER
+# =========================================================
+
+async def subscribe(ws, method: str, keys: Optional[List[str]] = None):
+    payload = {"method": method}
+    if keys:
+        payload["keys"] = keys
+    await ws.send(json.dumps(payload))
+
+
+async def websocket_loop():
+    while True:
+        try:
+            async with websockets.connect(PUMPPORTAL_WS, ping_interval=20, ping_timeout=20) as ws:
+                print("connected to PumpPortal")
+
+                await subscribe(ws, "subscribeNewToken")
+                await subscribe(ws, "subscribeMigration")
+
+                if SMART_WALLETS:
+                    await subscribe(ws, "subscribeAccountTrade", list(SMART_WALLETS))
+
+                while True:
+                    raw = await ws.recv()
+                    msg = json.loads(raw)
+
+                    mint = extract_mint(msg)
+                    if not mint:
+                        continue
+
+                    # New token / migration
+                    event_text = json.dumps(msg).lower()
+                    if "migration" in event_text:
+                        ensure_token(mint, extract_name(msg), extract_symbol(msg), "migration")
+                        await subscribe(ws, "subscribeTokenTrade", [mint])
+                        continue
+
+                    if "new" in event_text or ("name" in msg and "symbol" in msg):
+                        ensure_token(mint, extract_name(msg), extract_symbol(msg), "new_token")
+                        await subscribe(ws, "subscribeTokenTrade", [mint])
+                        continue
+
+                    # Trade
+                    side = extract_side(msg)
+                    wallet = extract_wallet(msg)
+                    if side:
+                        update_trade_state(mint, wallet, side)
+                        if wallet and wallet in SMART_WALLETS:
+                            add_smart_wallet_hit(mint, wallet)
+
+        except Exception as e:
+            print("websocket error, reconnecting:", e)
+            await asyncio.sleep(5)
+
+
+async def evaluator_loop():
+    while True:
+        try:
+            cleanup_state()
+            mints = list(STATE.get("tokens", {}).keys())
+            for mint in mints:
+                evaluate_token(mint)
+        except Exception as e:
+            print("evaluator error:", e)
+
+        await asyncio.sleep(EVALUATE_EVERY_SECONDS)
+
+
+async def save_loop():
+    while True:
+        save_state()
+        await asyncio.sleep(SAVE_EVERY_SECONDS)
+
+
+async def main():
+    load_state()
+    cleanup_state()
+    print("SMART_WALLETS loaded:", len(SMART_WALLETS))
+    print("RPC enabled:", bool(SOLANA_RPC_URL))
+
+    await asyncio.gather(
+        websocket_loop(),
+        evaluator_loop(),
+        save_loop(),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
