@@ -17,7 +17,7 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-# Batch agressif mais encore raisonnable pour GitHub
+# Batch raisonnable pour GitHub
 BATCHES = 10
 PAGES_PER_BATCH = 1
 PAUSE_BETWEEN_BATCHES = 1.8
@@ -33,6 +33,7 @@ GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pool
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 DEX_BOOSTS_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
+DEX_COMMUNITY_TAKEOVERS = "https://api.dexscreener.com/community-takeovers/latest/v1"
 
 # =========================
 # UTILS
@@ -247,8 +248,23 @@ def fetch_dex_boosts():
 
     return boosted
 
+
+def fetch_dex_community_takeovers():
+    takeover = set()
+    data = get_json(DEX_COMMUNITY_TAKEOVERS)
+    if not isinstance(data, list):
+        return takeover
+
+    for item in data:
+        if item.get("chainId") == "solana":
+            addr = item.get("tokenAddress")
+            if addr:
+                takeover.add(addr)
+
+    return takeover
+
 # =========================
-# GECKOTERMINAL BATCH
+# GECKOTERMINAL
 # =========================
 
 def fetch_gecko_new_pools_batched():
@@ -413,9 +429,8 @@ def rug_reject(candidate, profile):
     if br5 < 0.45:
         return True
 
-    # plus intelligent : on ne rejette pas automatiquement si les socials
-    # DexScreener ne sont pas encore enrichis.
-    # Mais si socials = 0 ET activité faible, on rejette.
+    # socials pas encore enrichis ? on laisse passer
+    # seulement si l'activité est déjà correcte
     if socials_quality(profile) == 0 and (v24 < 40_000 or tx5 < 8):
         return True
 
@@ -425,7 +440,7 @@ def rug_reject(candidate, profile):
 # SCORE
 # =========================
 
-def compute_score(candidate, profile, boosted):
+def compute_score(candidate, profile, boosted, takeovers):
     mc = candidate["market_cap"]
     liq = candidate["liquidity"]
     v5 = candidate["volume_5m"]
@@ -435,6 +450,7 @@ def compute_score(candidate, profile, boosted):
     tx1 = candidate["tx_1h"]
     br5 = candidate["buy_ratio_5m"]
     age = candidate["age_min"]
+    token_addr = candidate["token_address"]
 
     score = 0
     reasons = []
@@ -509,9 +525,14 @@ def compute_score(candidate, profile, boosted):
         score += 1
 
     # Dex boosts
-    if candidate["token_address"] in boosted:
+    if token_addr in boosted:
         score += 1
         reasons.append("boost DexScreener")
+
+    # Community takeover = vrai signal batch supplémentaire
+    if token_addr in takeovers:
+        score += 1
+        reasons.append("community takeover")
 
     # Launchpad / pump-like
     if "pump" in candidate["dex_id"] or "launch" in candidate["dex_id"]:
@@ -578,9 +599,11 @@ def main():
 
     profiles = fetch_dex_profiles()
     boosted = fetch_dex_boosts()
+    takeovers = fetch_dex_community_takeovers()
     pools = fetch_gecko_new_pools_batched()
 
     print(f"Checked {len(pools)} pools")
+    print(f"Dex community takeovers: {len(takeovers)}")
 
     alerts = []
 
@@ -591,7 +614,7 @@ def main():
         if rug_reject(candidate, profile):
             continue
 
-        score, reasons = compute_score(candidate, profile, boosted)
+        score, reasons = compute_score(candidate, profile, boosted, takeovers)
 
         buy_color, buy_action = classify_buy(score)
         if buy_color and not recently_alerted(state, token_addr):
