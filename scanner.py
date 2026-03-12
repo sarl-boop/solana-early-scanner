@@ -23,14 +23,12 @@ DEX_TOKEN_API = "https://api.dexscreener.com/tokens/v1/solana/"
 
 STATE_FILE = Path("state.json")
 
-# timing
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
 TOKEN_TTL_SECONDS = 48 * 3600
 ALERT_COOLDOWN_SECONDS = 12 * 3600
 
-# risk / scoring
 MAX_MARKET_CAP = 5_000_000
 MIN_LIQUIDITY = 15_000
 MIN_LIQ_TO_MC_RATIO = 0.40
@@ -40,25 +38,28 @@ NO_CHASE_MULTIPLIER = 2.2
 GOLD_SCORE = 8
 GREEN_SCORE = 6
 
-# token program id
-TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+# holder thresholds (strict)
+TOP1_HARD_REJECT = 0.15
+TOP3_HARD_REJECT = 0.35
+TOP1_SOFT_PENALTY = 0.08
+TOP3_SOFT_PENALTY = 0.22
 
 # =========================================================
 # STATE
 # =========================================================
 
 STATE: Dict[str, Any] = {
-    "tokens": {},       # mint -> token record
-    "alerted": {},      # mint -> last alert ts
-    "last_heartbeat": 0
+    "tokens": {},
+    "alerted": {},
+    "last_heartbeat": 0,
 }
 
-# token record example
+# token shape:
 # {
 #   "mint": str,
 #   "name": str,
 #   "symbol": str,
-#   "source": "new_token" | "migration" | "unknown",
+#   "source": "new_token"|"migration"|"unknown",
 #   "first_seen_ts": int,
 #   "last_seen_ts": int,
 #   "first_seen_mc": float,
@@ -67,7 +68,7 @@ STATE: Dict[str, Any] = {
 #   "smart_wallet_hits": [],
 #   "buy_wallet_counts": {},
 #   "first_buy_wallets": [],
-#   "first_buy_ts": int,
+#   "first_buy_ts": int
 # }
 
 # =========================================================
@@ -106,7 +107,7 @@ def save_state() -> None:
     try:
         STATE_FILE.write_text(
             json.dumps(STATE, indent=2, ensure_ascii=False),
-            encoding="utf-8"
+            encoding="utf-8",
         )
     except Exception as e:
         print("state save error:", e)
@@ -175,7 +176,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
     return rec
 
 # =========================================================
-# RPC
+# SOLANA RPC
 # =========================================================
 
 def rpc_call(method: str, params: list) -> Optional[dict]:
@@ -239,14 +240,12 @@ def get_holder_stats(mint: str) -> dict:
     hard_reject = False
     soft_penalty = False
 
-    # anti dev wallet / concentration
-    if top1_pct > 0.15:
+    if top1_pct > TOP1_HARD_REJECT:
         hard_reject = True
-    if top3_pct > 0.35:
+    if top3_pct > TOP3_HARD_REJECT:
         hard_reject = True
 
-    # softer concentration warning
-    if top1_pct > 0.08 or top3_pct > 0.22:
+    if top1_pct > TOP1_SOFT_PENALTY or top3_pct > TOP3_SOFT_PENALTY:
         soft_penalty = True
 
     return {
@@ -321,7 +320,7 @@ def extract_side(msg: dict) -> str:
     return ""
 
 # =========================================================
-# TRACKING / RISK
+# TRACKING
 # =========================================================
 
 def update_trade_tracking(mint: str, wallet: Optional[str], side: str) -> None:
@@ -340,27 +339,31 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str) -> None:
         rec["first_buy_wallets"].append(wallet)
 
 
+def add_smart_wallet_hit(mint: str, wallet: str) -> None:
+    rec = ensure_token(mint)
+    hits = set(rec.get("smart_wallet_hits", []))
+    hits.add(wallet)
+    rec["smart_wallet_hits"] = list(hits)
+
+# =========================================================
+# RISKS / FILTERS
+# =========================================================
+
 def coordinated_pump_risk(token_state: dict) -> bool:
-    """
-    Suspicious if very few wallets dominate early buys.
-    """
     counts = token_state.get("buy_wallet_counts", {})
     if not counts:
         return False
 
     total_buys = sum(counts.values())
     unique_wallets = len(counts)
+    biggest = max(counts.values()) if counts else 0
 
     if total_buys < 8:
         return False
 
-    biggest = max(counts.values()) if counts else 0
-
-    # one wallet buying too many times very early
     if biggest > 2:
         return True
 
-    # too few wallets for too many early buys
     if total_buys >= 10 and unique_wallets <= 3:
         return True
 
@@ -385,11 +388,20 @@ def no_chase_risk(first_seen_mc: float, current_mc: float, age_min: float) -> bo
     return current_mc > first_seen_mc * NO_CHASE_MULTIPLIER
 
 
-def add_smart_wallet_hit(mint: str, wallet: str) -> None:
-    rec = ensure_token(mint)
-    hits = set(rec.get("smart_wallet_hits", []))
-    hits.add(wallet)
-    rec["smart_wallet_hits"] = list(hits)
+def holder_growth_burst(token_state: dict) -> bool:
+    first_buy_wallets = token_state.get("first_buy_wallets", [])
+    buy_wallet_counts = token_state.get("buy_wallet_counts", {})
+
+    unique_early_wallets = len(set(first_buy_wallets))
+    total_buy_wallets = len(buy_wallet_counts)
+
+    if unique_early_wallets >= 8:
+        return True
+
+    if total_buy_wallets >= 12:
+        return True
+
+    return False
 
 # =========================================================
 # SCORE / CLASSIFY
@@ -398,6 +410,7 @@ def add_smart_wallet_hit(mint: str, wallet: str) -> None:
 def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, List[str]):
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+
     vol = pair.get("volume") or {}
     txs = pair.get("txns") or {}
 
@@ -434,6 +447,10 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     elif v5 > 8_000:
         score += 1
 
+    if v1 > 0 and v5 * 12 > v1 * 0.30:
+        score += 1
+        reasons.append("momentum confirmé")
+
     if buys > sells:
         score += 1
         reasons.append("acheteurs dominants")
@@ -451,6 +468,10 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     if age_min <= 5:
         score += 1
         reasons.append("très early")
+
+    if holder_growth_burst(token_state):
+        score += 2
+        reasons.append("holder growth burst")
 
     if holder_stats.get("soft_penalty"):
         score -= 2
@@ -527,7 +548,12 @@ def evaluate_token(mint: str) -> None:
 
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
-    vol24 = to_float((pair.get("volume") or {}).get("h24"), 0.0)
+
+    vol = pair.get("volume") or {}
+    v5 = to_float(vol.get("m5"), 0.0)
+    v1 = to_float(vol.get("h1"), 0.0)
+    vol24 = to_float(vol.get("h24"), 0.0)
+
     age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
 
     token_state["last_pair_url"] = pair.get("url") or ""
@@ -537,12 +563,18 @@ def evaluate_token(mint: str) -> None:
         token_state["first_seen_mc"] = mc
     token_state["max_seen_mc"] = max(token_state.get("max_seen_mc", 0.0), mc)
 
-    # hard gates
     if mc <= 0 or mc > MAX_MARKET_CAP:
         return
     if liq < MIN_LIQUIDITY:
         return
     if age_min < 1:
+        return
+
+    # anti faux spikes
+    if vol24 > 0 and v5 > vol24 * 0.4:
+        return
+
+    if v1 > 0 and v5 > v1 * 0.6:
         return
 
     holder_stats = get_holder_stats(mint)
@@ -562,7 +594,7 @@ def evaluate_token(mint: str) -> None:
     if recently_alerted(mint):
         return
 
-    # no uncertain alerts; send only clear action
+    # n'envoie que si action claire
     if color == "🔴 RED" or score >= GREEN_SCORE:
         msg = build_alert(pair, token_state, holder_stats, score, color)
         send_discord(msg)
@@ -601,7 +633,6 @@ async def websocket_loop():
 
                     event_text = json.dumps(msg).lower()
 
-                    # new token / migration
                     if "migration" in event_text:
                         ensure_token(mint, extract_name(msg), extract_symbol(msg), "migration")
                         await subscribe(ws, "subscribeTokenTrade", [mint])
@@ -612,7 +643,6 @@ async def websocket_loop():
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
-                    # token trades
                     side = extract_side(msg)
                     wallet = extract_wallet(msg)
 
