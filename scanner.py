@@ -17,7 +17,6 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-# Batch raisonnable pour GitHub
 BATCHES = 10
 PAGES_PER_BATCH = 1
 PAUSE_BETWEEN_BATCHES = 1.8
@@ -28,6 +27,7 @@ TIMEOUT = 15
 
 ALERT_COOLDOWN_HOURS = 12
 STATUS_INTERVAL_SECONDS = 3600
+SEEN_TTL_HOURS = 48
 
 GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -55,10 +55,15 @@ def to_float(v, default=0.0):
         return default
 
 
+def now_ts() -> int:
+    return int(time.time())
+
+
 def load_state():
     default_state = {
         "alerted": {},
-        "last_status_ts": 0
+        "last_status_ts": 0,
+        "seen": {}
     }
 
     if not STATE_FILE.exists():
@@ -68,10 +73,14 @@ def load_state():
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return default_state
+
         if "alerted" not in data or not isinstance(data["alerted"], dict):
             data["alerted"] = {}
         if "last_status_ts" not in data:
             data["last_status_ts"] = 0
+        if "seen" not in data or not isinstance(data["seen"], dict):
+            data["seen"] = {}
+
         return data
     except Exception as e:
         print("State load error:", e)
@@ -89,12 +98,24 @@ def save_state(state):
 
 
 def cleanup_old_alerts(state):
-    now = time.time()
+    now = now_ts()
     keep = {}
     for addr, ts in state["alerted"].items():
         if now - ts < 7 * 24 * 3600:
             keep[addr] = ts
     state["alerted"] = keep
+
+
+def cleanup_old_seen(state):
+    now = now_ts()
+    keep = {}
+    for addr, rec in state["seen"].items():
+        if not isinstance(rec, dict):
+            continue
+        last_seen = int(rec.get("last_seen_ts", 0))
+        if now - last_seen < SEEN_TTL_HOURS * 3600:
+            keep[addr] = rec
+    state["seen"] = keep
 
 
 def recently_alerted(state, token_addr: str):
@@ -326,6 +347,7 @@ def fetch_gecko_new_pools_batched():
                     ).lower()
 
                     market_cap = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
+                    fdv = to_float(attrs.get("fdv_usd"))
                     liquidity = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
 
                     volume_map = attrs.get("volume_usd", {}) or {}
@@ -352,6 +374,7 @@ def fetch_gecko_new_pools_batched():
                         "token_address": token_addr,
                         "dex_id": dex_id,
                         "market_cap": market_cap,
+                        "fdv": fdv,
                         "liquidity": liquidity,
                         "volume_5m": volume_5m,
                         "volume_1h": volume_1h,
@@ -393,8 +416,46 @@ def socials_quality(profile):
     return score
 
 
+def wash_trading_risk(candidate):
+    liq = candidate["liquidity"]
+    v24 = candidate["volume_24h"]
+    tx5 = candidate["tx_5m"]
+    age = candidate["age_min"]
+
+    if liq <= 0:
+        return False
+
+    vol_liq_ratio = v24 / liq
+
+    # suspicious when volume is absurdly high relative to tiny pool
+    if vol_liq_ratio > 35:
+        return True
+
+    # very early hyperactivity on very small liquidity
+    if age is not None and age <= 20 and liq < 25_000 and tx5 > 45:
+        return True
+
+    return False
+
+
+def fragile_pool_risk(candidate):
+    liq = candidate["liquidity"]
+    tx5 = candidate["tx_5m"]
+    v5 = candidate["volume_5m"]
+
+    return liq < 30_000 and (tx5 > 40 or v5 > 20_000)
+
+
+def unknown_mcap_risk(candidate):
+    mc = candidate["market_cap"]
+    fdv = candidate["fdv"]
+
+    return mc <= 0 and fdv <= 0
+
+
 def rug_reject(candidate, profile):
     mc = candidate["market_cap"]
+    fdv = candidate["fdv"]
     liq = candidate["liquidity"]
     v24 = candidate["volume_24h"]
     v5 = candidate["volume_5m"]
@@ -402,19 +463,25 @@ def rug_reject(candidate, profile):
     br5 = candidate["buy_ratio_5m"]
     age = candidate["age_min"]
 
+    effective_mc = mc if mc > 0 else fdv
+
     if not candidate["token_address"]:
         return True
 
-    if mc <= 0 or mc > 5_000_000:
+    if unknown_mcap_risk(candidate):
+        return True
+
+    if effective_mc <= 0 or effective_mc > 5_000_000:
         return True
 
     if liq < 15_000:
         return True
 
-    if liq / max(mc, 1) < 0.04:
+    if liq / max(effective_mc, 1) < 0.04:
         return True
 
-    if age is not None and age < 2:
+    # very early is okay; only sub-1-minute is too raw
+    if age is not None and age < 1:
         return True
 
     if age is not None and age > 720:
@@ -432,10 +499,16 @@ def rug_reject(candidate, profile):
     if socials_quality(profile) == 0 and (v24 < 40_000 or tx5 < 8):
         return True
 
+    if wash_trading_risk(candidate):
+        return True
+
+    if fragile_pool_risk(candidate):
+        return True
+
     return False
 
 # =========================
-# V4 ULTRA RADARS
+# RADARS
 # =========================
 
 def momentum_signal(candidate):
@@ -461,13 +534,16 @@ def holder_burst(candidate):
 def pumpfun_style(candidate):
     dex = candidate["dex_id"]
     mc = candidate["market_cap"]
+    fdv = candidate["fdv"]
     liq = candidate["liquidity"]
 
-    return "pump" in dex and mc < 300_000 and liq > 20_000
+    effective_mc = mc if mc > 0 else fdv
+    return "pump" in dex and effective_mc < 300_000 and liq > 20_000
 
 
 def x_engine(candidate):
     mc = candidate["market_cap"]
+    fdv = candidate["fdv"]
     liq = candidate["liquidity"]
     v5 = candidate["volume_5m"]
     v1 = candidate["volume_1h"]
@@ -475,12 +551,13 @@ def x_engine(candidate):
     tx1 = candidate["tx_1h"]
     br5 = candidate["buy_ratio_5m"]
 
+    effective_mc = mc if mc > 0 else fdv
     signals = 0
 
-    if 10_000 < mc < 200_000:
+    if 10_000 < effective_mc < 200_000:
         signals += 1
 
-    if liq / max(mc, 1) > 0.25:
+    if liq / max(effective_mc, 1) > 0.25:
         signals += 1
 
     if v1 > 0 and v5 * 12 > v1 * 0.35:
@@ -494,12 +571,113 @@ def x_engine(candidate):
 
     return signals
 
+
+def update_seen_record(state, candidate):
+    addr = candidate["token_address"]
+    now = now_ts()
+
+    effective_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
+
+    rec = state["seen"].get(addr, {})
+    if not isinstance(rec, dict):
+        rec = {}
+
+    first_seen_ts = int(rec.get("first_seen_ts", now))
+    first_seen_mc = to_float(rec.get("first_seen_mc"), effective_mc)
+    first_seen_v5 = to_float(rec.get("first_seen_v5"), candidate["volume_5m"])
+
+    max_mc = max(to_float(rec.get("max_mc"), effective_mc), effective_mc)
+    max_v5 = max(to_float(rec.get("max_v5"), candidate["volume_5m"]), candidate["volume_5m"])
+    max_tx5 = max(int(rec.get("max_tx5", candidate["tx_5m"])), candidate["tx_5m"])
+
+    prev_v5 = to_float(rec.get("last_v5"), candidate["volume_5m"])
+    prev_tx5 = int(rec.get("last_tx5", candidate["tx_5m"]))
+    prev_mc = to_float(rec.get("last_mc"), effective_mc)
+
+    new_rec = {
+        "first_seen_ts": first_seen_ts,
+        "first_seen_mc": first_seen_mc,
+        "first_seen_v5": first_seen_v5,
+        "last_seen_ts": now,
+        "last_mc": effective_mc,
+        "last_v5": candidate["volume_5m"],
+        "last_tx5": candidate["tx_5m"],
+        "prev_mc": prev_mc,
+        "prev_v5": prev_v5,
+        "prev_tx5": prev_tx5,
+        "max_mc": max_mc,
+        "max_v5": max_v5,
+        "max_tx5": max_tx5,
+    }
+
+    state["seen"][addr] = new_rec
+    return new_rec
+
+
+def no_chase_filter(candidate, seen):
+    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
+    age = candidate["age_min"]
+
+    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
+    max_mc = to_float(seen.get("max_mc"), current_mc)
+
+    if age is not None and age > 15 and first_mc > 0 and current_mc > first_mc * 2.4:
+        return True
+
+    if max_mc > 0 and current_mc >= max_mc * 0.98 and first_mc > 0 and max_mc > first_mc * 2.8:
+        return True
+
+    return False
+
+
+def early_base_signal(candidate, seen):
+    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
+    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
+    age = candidate["age_min"]
+    br5 = candidate["buy_ratio_5m"]
+
+    if first_mc <= 0:
+        return False
+
+    return (
+        age is not None
+        and age <= 20
+        and current_mc <= first_mc * 1.35
+        and br5 > 0.55
+        and candidate["volume_5m"] > 6000
+    )
+
+
+def second_wave_signal(candidate, seen):
+    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
+    br5 = candidate["buy_ratio_5m"]
+    v5 = candidate["volume_5m"]
+    tx5 = candidate["tx_5m"]
+
+    first_mc = to_float(seen.get("first_seen_mc"), current_mc)
+    prev_v5 = to_float(seen.get("prev_v5"), v5)
+    prev_tx5 = int(seen.get("prev_tx5", tx5))
+    max_mc = to_float(seen.get("max_mc"), current_mc)
+
+    if first_mc <= 0 or max_mc <= 0:
+        return False
+
+    return (
+        max_mc > first_mc * 1.25
+        and current_mc < max_mc * 0.92
+        and current_mc > first_mc * 1.05
+        and v5 > max(prev_v5 * 1.5, 8000)
+        and tx5 >= max(prev_tx5 + 3, 8)
+        and br5 > 0.56
+    )
+
 # =========================
 # SCORE
 # =========================
 
-def compute_score(candidate, profile, boosted, takeovers):
+def compute_score(candidate, profile, boosted, takeovers, seen):
     mc = candidate["market_cap"]
+    fdv = candidate["fdv"]
     liq = candidate["liquidity"]
     v5 = candidate["volume_5m"]
     v1 = candidate["volume_1h"]
@@ -510,21 +688,23 @@ def compute_score(candidate, profile, boosted, takeovers):
     age = candidate["age_min"]
     token_addr = candidate["token_address"]
 
+    effective_mc = mc if mc > 0 else fdv
+
     score = 0
     reasons = []
 
     # Micro-cap
-    if mc < 800_000:
+    if effective_mc < 800_000:
         score += 3
         reasons.append("micro-cap basse")
-    elif mc < 2_000_000:
+    elif effective_mc < 2_000_000:
         score += 2
         reasons.append("micro-cap correcte")
-    elif mc < 5_000_000:
+    elif effective_mc < 5_000_000:
         score += 1
 
     # Liquidité
-    liq_ratio = liq / max(mc, 1)
+    liq_ratio = liq / max(effective_mc, 1)
     if liq > 120_000:
         score += 2
         reasons.append("bonne liquidité")
@@ -598,10 +778,10 @@ def compute_score(candidate, profile, boosted, takeovers):
         reasons.append("launchpad early")
 
     # Sweet spot d’âge
-    if age is not None and 4 <= age <= 180:
+    if age is not None and 2 <= age <= 180:
         score += 1
 
-    # V4 ULTRA bonuses
+    # V4/V5 bonuses
     if momentum_signal(candidate):
         score += 1
         reasons.append("momentum radar")
@@ -614,7 +794,6 @@ def compute_score(candidate, profile, boosted, takeovers):
         score += 1
         reasons.append("pump.fun early")
 
-    # X-engine
     x_signals = x_engine(candidate)
     if x_signals >= 4:
         score += 2
@@ -623,10 +802,35 @@ def compute_score(candidate, profile, boosted, takeovers):
         score += 1
         reasons.append("x-engine momentum")
 
-    return min(score, 10), reasons
+    # V6 bonuses
+    if early_base_signal(candidate, seen):
+        score += 1
+        reasons.append("early base")
+
+    if second_wave_signal(candidate, seen):
+        score += 2
+        reasons.append("second wave")
+
+    # anti-trap soft penalties
+    if wash_trading_risk(candidate):
+        score -= 3
+        reasons.append("wash-trading risk")
+
+    if fragile_pool_risk(candidate):
+        score -= 2
+        reasons.append("fragile pool")
+
+    if candidate["market_cap"] <= 0 and candidate["fdv"] > 0:
+        score -= 1
+        reasons.append("mcap incertaine")
+
+    return max(0, min(score, 10)), reasons
 
 
-def classify_buy(score):
+def classify_buy(score, candidate, seen):
+    if no_chase_filter(candidate, seen):
+        return None, None
+
     if score >= 9:
         return "🟡 GOLD", "Buy 50€ maintenant"
     if score >= 7:
@@ -647,14 +851,18 @@ def classify_sell(candidate):
 # MESSAGE
 # =========================
 
-def build_message(color, candidate, score, reasons, action):
-    mc = int(candidate["market_cap"])
+def build_message(color, candidate, score, reasons, action, seen):
+    current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
+    mc = int(current_mc)
     liq = int(candidate["liquidity"])
+    first_mc = int(to_float(seen.get("first_seen_mc"), current_mc))
+    max_mc = int(to_float(seen.get("max_mc"), current_mc))
+
     age = "?"
     if candidate["age_min"] is not None:
         age = f"{int(candidate['age_min'])} min"
 
-    reason = " + ".join(reasons[:3]) if reasons else "signal confirmé"
+    reason = " + ".join(reasons[:4]) if reasons else "signal confirmé"
 
     return (
         f"{color}\n\n"
@@ -663,6 +871,8 @@ def build_message(color, candidate, score, reasons, action):
         f"Color: {color}\n"
         f"Market cap: ${mc:,}\n"
         f"Liquidity: ${liq:,}\n"
+        f"First seen MC: ${first_mc:,}\n"
+        f"Max seen MC: ${max_mc:,}\n"
         f"Reason: {reason}\n"
         f"Age: {age}\n"
         f"Dex: https://dexscreener.com/solana/{candidate['token_address']}\n\n"
@@ -676,6 +886,7 @@ def build_message(color, candidate, score, reasons, action):
 def main():
     state = load_state()
     cleanup_old_alerts(state)
+    cleanup_old_seen(state)
 
     profiles = fetch_dex_profiles()
     boosted = fetch_dex_boosts()
@@ -691,15 +902,21 @@ def main():
         token_addr = candidate["token_address"]
         profile = profiles.get(token_addr, {})
 
+        seen = update_seen_record(state, candidate)
+
         if rug_reject(candidate, profile):
             continue
 
-        score, reasons = compute_score(candidate, profile, boosted, takeovers)
+        score, reasons = compute_score(candidate, profile, boosted, takeovers, seen)
 
-        buy_color, buy_action = classify_buy(score)
+        buy_color, buy_action = classify_buy(score, candidate, seen)
         if buy_color and not recently_alerted(state, token_addr):
             alerts.append(
-                (score, build_message(buy_color, candidate, score, reasons, buy_action), token_addr)
+                (
+                    score,
+                    build_message(buy_color, candidate, score, reasons, buy_action, seen),
+                    token_addr
+                )
             )
             continue
 
@@ -707,7 +924,11 @@ def main():
             sell_color, sell_action = classify_sell(candidate)
             if sell_color and not recently_alerted(state, token_addr):
                 alerts.append(
-                    (score, build_message(sell_color, candidate, score, reasons, sell_action), token_addr)
+                    (
+                        score,
+                        build_message(sell_color, candidate, score, reasons, sell_action, seen),
+                        token_addr
+                    )
                 )
 
     alerts.sort(key=lambda x: x[0], reverse=True)
@@ -721,7 +942,7 @@ def main():
             if sent >= MAX_ALERTS_PER_RUN:
                 break
     else:
-        now = int(time.time())
+        now = now_ts()
         if now - state.get("last_status_ts", 0) >= STATUS_INTERVAL_SECONDS:
             send(f"🤖 SCANNER ACTIVE — No signals detected | Checked {len(pools)} pools")
             state["last_status_ts"] = now
