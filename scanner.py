@@ -11,6 +11,7 @@ import requests
 # =========================
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
 OWNED_TOKENS = {
     x.strip() for x in os.environ.get("OWNED_TOKENS", "").split(",") if x.strip()
 }
@@ -34,6 +35,8 @@ DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_BOOSTS_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 DEX_BOOSTS_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 DEX_COMMUNITY_TAKEOVERS = "https://api.dexscreener.com/community-takeovers/latest/v1"
+
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 # =========================
 # UTILS
@@ -203,6 +206,161 @@ def get_json_with_429_retry(url: str, params=None, headers=None, retries=2):
                 time.sleep(1.0)
                 continue
             return None
+
+# =========================
+# SOLANA RPC
+# =========================
+
+def rpc_call(method, params):
+    if not SOLANA_RPC_URL:
+        return None
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }
+
+    try:
+        r = requests.post(SOLANA_RPC_URL, json=payload, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result")
+    except Exception as e:
+        print("RPC error:", method, e)
+        return None
+
+
+def get_token_supply(mint_address):
+    result = rpc_call("getTokenSupply", [mint_address, {"commitment": "confirmed"}])
+    if not result:
+        return 0.0
+    value = result.get("value", {})
+    return to_float(value.get("uiAmount"), 0.0)
+
+
+def get_token_largest_accounts(mint_address):
+    result = rpc_call("getTokenLargestAccounts", [mint_address, {"commitment": "confirmed"}])
+    if not result:
+        return []
+    return result.get("value", []) or []
+
+
+def get_account_info(account_address):
+    result = rpc_call(
+        "getAccountInfo",
+        [account_address, {"commitment": "confirmed", "encoding": "jsonParsed"}]
+    )
+    if not result:
+        return None
+    return result.get("value")
+
+
+def classify_top_holder_account(account_info):
+    """
+    Heuristique prudente :
+    - if owner != token program => private / unknown
+    - if parsed token account exists => token account
+    - cannot perfectly prove AMM pool from RPC alone, so we classify:
+      token account + no obvious private owner field => probable_pool_like
+      otherwise unknown/private
+    """
+    if not account_info:
+        return "unknown"
+
+    owner = account_info.get("owner", "")
+    if owner != TOKEN_PROGRAM_ID:
+        return "private_or_unknown"
+
+    data = account_info.get("data")
+    if isinstance(data, dict):
+        parsed = data.get("parsed", {})
+        info = parsed.get("info", {})
+        token_amount = info.get("tokenAmount")
+        if token_amount is not None:
+            # token account, often pool-like but not guaranteed
+            return "token_account"
+
+    return "private_or_unknown"
+
+
+def get_holder_concentration(mint_address):
+    """
+    Returns:
+      {
+        enabled: bool,
+        supply: float,
+        top1_pct: float,
+        top3_pct: float,
+        holder_count_sample: int,
+        top1_kind: str,
+        hard_reject: bool,
+        soft_penalty: bool,
+      }
+    """
+    if not SOLANA_RPC_URL:
+        return {
+            "enabled": False,
+            "supply": 0.0,
+            "top1_pct": 0.0,
+            "top3_pct": 0.0,
+            "holder_count_sample": 0,
+            "top1_kind": "unknown",
+            "hard_reject": False,
+            "soft_penalty": False,
+        }
+
+    supply = get_token_supply(mint_address)
+    largest = get_token_largest_accounts(mint_address)
+
+    if not largest or supply <= 0:
+        return {
+            "enabled": False,
+            "supply": supply,
+            "top1_pct": 0.0,
+            "top3_pct": 0.0,
+            "holder_count_sample": len(largest),
+            "top1_kind": "unknown",
+            "hard_reject": False,
+            "soft_penalty": False,
+        }
+
+    top_ui = [to_float(x.get("uiAmount"), 0.0) for x in largest[:3]]
+    top1_pct = top_ui[0] / supply if len(top_ui) >= 1 and supply > 0 else 0.0
+    top3_pct = sum(top_ui[:3]) / supply if supply > 0 else 0.0
+
+    top1_addr = largest[0].get("address", "")
+    top1_info = get_account_info(top1_addr) if top1_addr else None
+    top1_kind = classify_top_holder_account(top1_info)
+
+    hard_reject = False
+    soft_penalty = False
+
+    # hard reject if clearly concentrated outside probable pool-like conditions
+    if top1_kind != "token_account" and top1_pct > 0.40:
+        hard_reject = True
+
+    if top1_kind != "token_account" and top3_pct > 0.70:
+        hard_reject = True
+
+    # even token_account can still be suspicious if concentration is extreme
+    if top1_kind == "token_account" and top3_pct > 0.92:
+        soft_penalty = True
+
+    if top1_kind == "token_account" and top1_pct > 0.88:
+        soft_penalty = True
+
+    return {
+        "enabled": True,
+        "supply": supply,
+        "top1_pct": top1_pct,
+        "top3_pct": top3_pct,
+        "holder_count_sample": len(largest),
+        "top1_kind": top1_kind,
+        "hard_reject": hard_reject,
+        "soft_penalty": soft_penalty,
+    }
 
 # =========================
 # DEXSCREENER
@@ -427,11 +585,9 @@ def wash_trading_risk(candidate):
 
     vol_liq_ratio = v24 / liq
 
-    # suspicious when volume is absurdly high relative to tiny pool
     if vol_liq_ratio > 35:
         return True
 
-    # very early hyperactivity on very small liquidity
     if age is not None and age <= 20 and liq < 25_000 and tx5 > 45:
         return True
 
@@ -442,18 +598,16 @@ def fragile_pool_risk(candidate):
     liq = candidate["liquidity"]
     tx5 = candidate["tx_5m"]
     v5 = candidate["volume_5m"]
-
     return liq < 30_000 and (tx5 > 40 or v5 > 20_000)
 
 
 def unknown_mcap_risk(candidate):
     mc = candidate["market_cap"]
     fdv = candidate["fdv"]
-
     return mc <= 0 and fdv <= 0
 
 
-def rug_reject(candidate, profile):
+def rug_reject(candidate, profile, holder_stats):
     mc = candidate["market_cap"]
     fdv = candidate["fdv"]
     liq = candidate["liquidity"]
@@ -480,7 +634,6 @@ def rug_reject(candidate, profile):
     if liq / max(effective_mc, 1) < 0.04:
         return True
 
-    # very early is okay; only sub-1-minute is too raw
     if age is not None and age < 1:
         return True
 
@@ -503,6 +656,9 @@ def rug_reject(candidate, profile):
         return True
 
     if fragile_pool_risk(candidate):
+        return True
+
+    if holder_stats.get("hard_reject", False):
         return True
 
     return False
@@ -584,12 +740,8 @@ def update_seen_record(state, candidate):
 
     first_seen_ts = int(rec.get("first_seen_ts", now))
     first_seen_mc = to_float(rec.get("first_seen_mc"), effective_mc)
-    first_seen_v5 = to_float(rec.get("first_seen_v5"), candidate["volume_5m"])
 
     max_mc = max(to_float(rec.get("max_mc"), effective_mc), effective_mc)
-    max_v5 = max(to_float(rec.get("max_v5"), candidate["volume_5m"]), candidate["volume_5m"])
-    max_tx5 = max(int(rec.get("max_tx5", candidate["tx_5m"])), candidate["tx_5m"])
-
     prev_v5 = to_float(rec.get("last_v5"), candidate["volume_5m"])
     prev_tx5 = int(rec.get("last_tx5", candidate["tx_5m"]))
     prev_mc = to_float(rec.get("last_mc"), effective_mc)
@@ -597,7 +749,6 @@ def update_seen_record(state, candidate):
     new_rec = {
         "first_seen_ts": first_seen_ts,
         "first_seen_mc": first_seen_mc,
-        "first_seen_v5": first_seen_v5,
         "last_seen_ts": now,
         "last_mc": effective_mc,
         "last_v5": candidate["volume_5m"],
@@ -606,8 +757,6 @@ def update_seen_record(state, candidate):
         "prev_v5": prev_v5,
         "prev_tx5": prev_tx5,
         "max_mc": max_mc,
-        "max_v5": max_v5,
-        "max_tx5": max_tx5,
     }
 
     state["seen"][addr] = new_rec
@@ -675,7 +824,7 @@ def second_wave_signal(candidate, seen):
 # SCORE
 # =========================
 
-def compute_score(candidate, profile, boosted, takeovers, seen):
+def compute_score(candidate, profile, boosted, takeovers, seen, holder_stats):
     mc = candidate["market_cap"]
     fdv = candidate["fdv"]
     liq = candidate["liquidity"]
@@ -781,7 +930,7 @@ def compute_score(candidate, profile, boosted, takeovers, seen):
     if age is not None and 2 <= age <= 180:
         score += 1
 
-    # V4/V5 bonuses
+    # V4/V5/V6
     if momentum_signal(candidate):
         score += 1
         reasons.append("momentum radar")
@@ -802,7 +951,6 @@ def compute_score(candidate, profile, boosted, takeovers, seen):
         score += 1
         reasons.append("x-engine momentum")
 
-    # V6 bonuses
     if early_base_signal(candidate, seen):
         score += 1
         reasons.append("early base")
@@ -811,7 +959,28 @@ def compute_score(candidate, profile, boosted, takeovers, seen):
         score += 2
         reasons.append("second wave")
 
-    # anti-trap soft penalties
+    # V8 holder intelligence
+    if holder_stats.get("enabled"):
+        top1_pct = holder_stats.get("top1_pct", 0.0)
+        top3_pct = holder_stats.get("top3_pct", 0.0)
+        top1_kind = holder_stats.get("top1_kind", "unknown")
+
+        if top1_kind == "token_account":
+            reasons.append("top1 pool-like")
+        if top1_pct < 0.20:
+            score += 1
+            reasons.append("distribution saine")
+        elif top1_pct > 0.50 and top1_kind != "token_account":
+            score -= 3
+            reasons.append("top1 concentré")
+        elif top3_pct > 0.75 and top1_kind != "token_account":
+            score -= 2
+            reasons.append("top3 concentré")
+        elif holder_stats.get("soft_penalty", False):
+            score -= 1
+            reasons.append("concentration élevée")
+
+    # anti-trap penalties
     if wash_trading_risk(candidate):
         score -= 3
         reasons.append("wash-trading risk")
@@ -827,8 +996,11 @@ def compute_score(candidate, profile, boosted, takeovers, seen):
     return max(0, min(score, 10)), reasons
 
 
-def classify_buy(score, candidate, seen):
+def classify_buy(score, candidate, seen, holder_stats):
     if no_chase_filter(candidate, seen):
+        return None, None
+
+    if holder_stats.get("hard_reject", False):
         return None, None
 
     if score >= 9:
@@ -851,7 +1023,7 @@ def classify_sell(candidate):
 # MESSAGE
 # =========================
 
-def build_message(color, candidate, score, reasons, action, seen):
+def build_message(color, candidate, score, reasons, action, seen, holder_stats):
     current_mc = candidate["market_cap"] if candidate["market_cap"] > 0 else candidate["fdv"]
     mc = int(current_mc)
     liq = int(candidate["liquidity"])
@@ -862,7 +1034,14 @@ def build_message(color, candidate, score, reasons, action, seen):
     if candidate["age_min"] is not None:
         age = f"{int(candidate['age_min'])} min"
 
+    extras = []
+    if holder_stats.get("enabled"):
+        extras.append(f"Top1: {holder_stats.get('top1_pct', 0.0) * 100:.1f}%")
+        extras.append(f"Top3: {holder_stats.get('top3_pct', 0.0) * 100:.1f}%")
+        extras.append(f"Top1 kind: {holder_stats.get('top1_kind', 'unknown')}")
+
     reason = " + ".join(reasons[:4]) if reasons else "signal confirmé"
+    extra_text = "\n".join(extras)
 
     return (
         f"{color}\n\n"
@@ -875,9 +1054,10 @@ def build_message(color, candidate, score, reasons, action, seen):
         f"Max seen MC: ${max_mc:,}\n"
         f"Reason: {reason}\n"
         f"Age: {age}\n"
+        f"{extra_text}\n"
         f"Dex: https://dexscreener.com/solana/{candidate['token_address']}\n\n"
         f"Action: {action}"
-    )
+    ).strip()
 
 # =========================
 # MAIN
@@ -895,26 +1075,28 @@ def main():
 
     print(f"Checked {len(pools)} pools")
     print(f"Dex community takeovers: {len(takeovers)}")
+    print(f"RPC holder radar enabled: {bool(SOLANA_RPC_URL)}")
 
     alerts = []
 
     for candidate in pools:
         token_addr = candidate["token_address"]
         profile = profiles.get(token_addr, {})
-
         seen = update_seen_record(state, candidate)
 
-        if rug_reject(candidate, profile):
+        holder_stats = get_holder_concentration(token_addr)
+
+        if rug_reject(candidate, profile, holder_stats):
             continue
 
-        score, reasons = compute_score(candidate, profile, boosted, takeovers, seen)
+        score, reasons = compute_score(candidate, profile, boosted, takeovers, seen, holder_stats)
 
-        buy_color, buy_action = classify_buy(score, candidate, seen)
+        buy_color, buy_action = classify_buy(score, candidate, seen, holder_stats)
         if buy_color and not recently_alerted(state, token_addr):
             alerts.append(
                 (
                     score,
-                    build_message(buy_color, candidate, score, reasons, buy_action, seen),
+                    build_message(buy_color, candidate, score, reasons, buy_action, seen, holder_stats),
                     token_addr
                 )
             )
@@ -926,7 +1108,7 @@ def main():
                 alerts.append(
                     (
                         score,
-                        build_message(sell_color, candidate, score, reasons, sell_action, seen),
+                        build_message(sell_color, candidate, score, reasons, sell_action, seen, holder_stats),
                         token_addr
                     )
                 )
