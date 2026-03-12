@@ -9,6 +9,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+
     concurrency:
       group: crypto-scanner-live
       cancel-in-progress: true
