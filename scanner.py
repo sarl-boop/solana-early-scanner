@@ -17,9 +17,14 @@ OWNED_TOKENS = {
 
 STATE_FILE = Path("state.json")
 
-GT_PAGES = 10                   # 5 pages ~ 100 pools, plus stable pour GitHub
-MAX_ALERTS_PER_RUN = 3
+# Logique "batch"
+BATCHES = 10                  # nombre de lots
+PAGES_PER_BATCH = 1           # 1 page Gecko par lot
+PAUSE_BETWEEN_BATCHES = 1.2   # pause entre lots
+RETRY_429_WAIT = 3.0          # pause si rate-limit
+MAX_ALERTS_PER_RUN = 4
 TIMEOUT = 15
+
 ALERT_COOLDOWN_HOURS = 12
 STATUS_INTERVAL_SECONDS = 3600
 
@@ -37,16 +42,6 @@ def send(msg: str) -> None:
         requests.post(WEBHOOK, json={"content": msg}, timeout=10)
     except Exception as e:
         print("Discord send error:", e)
-
-
-def get_json(url: str, params=None, headers=None):
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print("GET error:", url, e)
-        return None
 
 
 def to_float(v, default=0.0):
@@ -151,7 +146,43 @@ def buy_ratio(bucket):
         return 0.5
 
 # =========================
-# DEXSCREENER
+# HTTP HELPERS
+# =========================
+
+def get_json(url: str, params=None, headers=None):
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print("GET error:", url, e)
+        return None
+
+
+def get_json_with_429_retry(url: str, params=None, headers=None, retries=1):
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+
+            if r.status_code == 429:
+                print("429 rate limit on", url, "attempt", attempt + 1)
+                if attempt < retries:
+                    time.sleep(RETRY_429_WAIT)
+                    continue
+                return None
+
+            r.raise_for_status()
+            return r.json()
+
+        except Exception as e:
+            print("GET error:", url, e)
+            if attempt < retries:
+                time.sleep(1.0)
+                continue
+            return None
+
+# =========================
+# DEXSCREENER ENRICHMENT
 # =========================
 
 def fetch_dex_profiles():
@@ -216,104 +247,114 @@ def fetch_dex_boosts():
     return boosted
 
 # =========================
-# GECKOTERMINAL
+# GECKOTERMINAL BATCH SCAN
 # =========================
 
-def fetch_gecko_new_pools():
+def fetch_gecko_new_pools_batched():
     pools = []
+    page = 1
 
-    for page in range(1, GT_PAGES + 1):
-        data = get_json(
-            GECKO_NEW_POOLS,
-            params={"page": page, "include": "base_token,dex"},
-            headers={"accept": "application/json"},
-        )
-
-        if not data or "data" not in data:
-            continue
-
-        included = data.get("included", []) or []
-        inc_map = {}
-        for obj in included:
-            inc_map[(obj.get("type"), obj.get("id"))] = obj
-
-        for pool in data.get("data", []):
-            attrs = pool.get("attributes", {}) or {}
-            rels = pool.get("relationships", {}) or {}
-
-            base_ref = (((rels.get("base_token") or {}).get("data")) or {})
-            dex_ref = (((rels.get("dex") or {}).get("data")) or {})
-
-            base_obj = inc_map.get((base_ref.get("type"), base_ref.get("id")), {})
-            dex_obj = inc_map.get((dex_ref.get("type"), dex_ref.get("id")), {})
-
-            base_attrs = base_obj.get("attributes", {}) or {}
-            dex_attrs = dex_obj.get("attributes", {}) or {}
-
-            token_addr = (
-                base_attrs.get("address")
-                or attrs.get("base_token_address")
-                or ""
+    for batch in range(BATCHES):
+        for _ in range(PAGES_PER_BATCH):
+            data = get_json_with_429_retry(
+                GECKO_NEW_POOLS,
+                params={"page": page, "include": "base_token,dex"},
+                headers={"accept": "application/json"},
+                retries=1,
             )
 
-            name = (
-                base_attrs.get("name")
-                or attrs.get("name", "").split("/")[0].strip()
-                or "Unknown Token"
-            )
+            if data and "data" in data:
+                included = data.get("included", []) or []
+                inc_map = {}
+                for obj in included:
+                    inc_map[(obj.get("type"), obj.get("id"))] = obj
 
-            symbol = (
-                base_attrs.get("symbol")
-                or name
-            )
+                for pool in data.get("data", []):
+                    attrs = pool.get("attributes", {}) or {}
+                    rels = pool.get("relationships", {}) or {}
 
-            dex_id = (
-                dex_attrs.get("identifier")
-                or dex_attrs.get("name")
-                or ""
-            ).lower()
+                    base_ref = (((rels.get("base_token") or {}).get("data")) or {})
+                    dex_ref = (((rels.get("dex") or {}).get("data")) or {})
 
-            market_cap = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
-            liquidity = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
+                    base_obj = inc_map.get((base_ref.get("type"), base_ref.get("id")), {})
+                    dex_obj = inc_map.get((dex_ref.get("type"), dex_ref.get("id")), {})
 
-            volume_map = attrs.get("volume_usd", {}) or {}
-            tx_map = attrs.get("transactions", {}) or {}
+                    base_attrs = base_obj.get("attributes", {}) or {}
+                    dex_attrs = dex_obj.get("attributes", {}) or {}
 
-            volume_5m = to_float(volume_map.get("m5"))
-            volume_1h = to_float(volume_map.get("h1"))
-            volume_24h = to_float(volume_map.get("h24"))
+                    token_addr = (
+                        base_attrs.get("address")
+                        or attrs.get("base_token_address")
+                        or ""
+                    )
 
-            tx_5m = tx_count(tx_map.get("m5"))
-            tx_1h = tx_count(tx_map.get("h1"))
+                    name = (
+                        base_attrs.get("name")
+                        or attrs.get("name", "").split("/")[0].strip()
+                        or "Unknown Token"
+                    )
 
-            buy_ratio_5m = buy_ratio(tx_map.get("m5"))
-            buy_ratio_1h = buy_ratio(tx_map.get("h1"))
+                    symbol = (
+                        base_attrs.get("symbol")
+                        or name
+                    )
 
-            age_min = parse_age_minutes(
-                attrs.get("pool_created_at")
-                or attrs.get("created_at")
-            )
+                    dex_id = (
+                        dex_attrs.get("identifier")
+                        or dex_attrs.get("name")
+                        or ""
+                    ).lower()
 
-            pools.append({
-                "name": name,
-                "symbol": symbol,
-                "token_address": token_addr,
-                "dex_id": dex_id,
-                "market_cap": market_cap,
-                "liquidity": liquidity,
-                "volume_5m": volume_5m,
-                "volume_1h": volume_1h,
-                "volume_24h": volume_24h,
-                "tx_5m": tx_5m,
-                "tx_1h": tx_1h,
-                "buy_ratio_5m": buy_ratio_5m,
-                "buy_ratio_1h": buy_ratio_1h,
-                "age_min": age_min,
-            })
+                    market_cap = to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd"))
+                    liquidity = to_float(attrs.get("reserve_in_usd") or attrs.get("liquidity_usd"))
 
-        time.sleep(0.25)
+                    volume_map = attrs.get("volume_usd", {}) or {}
+                    tx_map = attrs.get("transactions", {}) or {}
 
-    return pools
+                    volume_5m = to_float(volume_map.get("m5"))
+                    volume_1h = to_float(volume_map.get("h1"))
+                    volume_24h = to_float(volume_map.get("h24"))
+
+                    tx_5m = tx_count(tx_map.get("m5"))
+                    tx_1h = tx_count(tx_map.get("h1"))
+
+                    buy_ratio_5m = buy_ratio(tx_map.get("m5"))
+                    buy_ratio_1h = buy_ratio(tx_map.get("h1"))
+
+                    age_min = parse_age_minutes(
+                        attrs.get("pool_created_at")
+                        or attrs.get("created_at")
+                    )
+
+                    pools.append({
+                        "name": name,
+                        "symbol": symbol,
+                        "token_address": token_addr,
+                        "dex_id": dex_id,
+                        "market_cap": market_cap,
+                        "liquidity": liquidity,
+                        "volume_5m": volume_5m,
+                        "volume_1h": volume_1h,
+                        "volume_24h": volume_24h,
+                        "tx_5m": tx_5m,
+                        "tx_1h": tx_1h,
+                        "buy_ratio_5m": buy_ratio_5m,
+                        "buy_ratio_1h": buy_ratio_1h,
+                        "age_min": age_min,
+                    })
+
+            page += 1
+
+        time.sleep(PAUSE_BETWEEN_BATCHES)
+
+    # déduplication simple par adresse token
+    dedup = {}
+    for p in pools:
+        addr = p["token_address"]
+        if addr and addr not in dedup:
+            dedup[addr] = p
+
+    return list(dedup.values())
 
 # =========================
 # FILTERS
@@ -342,36 +383,36 @@ def rug_reject(candidate, profile):
     age = candidate["age_min"]
 
     if not candidate["token_address"]:
-        return True, "pas d'adresse"
+        return True
 
-    if mc <= 0 or mc > 8_000_000:
-        return True, "hors filtre micro-cap"
+    if mc <= 0 or mc > 5_000_000:
+        return True
 
-    if liq < 20_000:
-        return True, "liquidité trop faible"
+    if liq < 15_000:
+        return True
 
-    if liq / max(mc, 1) < 0.05:
-        return True, "liquidité trop faible vs market cap"
+    if liq / max(mc, 1) < 0.04:
+        return True
 
     if age is not None and age < 2:
-        return True, "trop neuf"
+        return True
 
     if age is not None and age > 720:
-        return True, "plus vraiment early"
+        return True
 
-    if v24 < 20_000:
-        return True, "volume 24h trop faible"
+    if v24 < 15_000:
+        return True
 
-    if tx5 < 5 and v5 < 2_500:
-        return True, "activité trop faible"
+    if tx5 < 4 and v5 < 2_000:
+        return True
 
     if br5 < 0.45:
-        return True, "pression vendeuse"
+        return True
 
     if not enough_socials(profile):
-        return True, "socials insuffisants"
+        return True
 
-    return False, ""
+    return False
 
 # =========================
 # SCORE
@@ -391,22 +432,22 @@ def compute_score(candidate, profile, boosted):
     score = 0
     reasons = []
 
-    # micro-cap priority
-    if mc < 500_000:
+    # micro-cap plus agressif
+    if mc < 800_000:
         score += 3
-        reasons.append("micro-cap très basse")
+        reasons.append("micro-cap basse")
     elif mc < 2_000_000:
         score += 2
         reasons.append("micro-cap correcte")
     elif mc < 5_000_000:
         score += 1
 
-    # liquidity
+    # liquidité
     liq_ratio = liq / max(mc, 1)
-    if liq > 100_000:
+    if liq > 120_000:
         score += 2
         reasons.append("bonne liquidité")
-    elif liq > 50_000:
+    elif liq > 60_000:
         score += 1
         reasons.append("liquidité correcte")
 
@@ -416,36 +457,36 @@ def compute_score(candidate, profile, boosted):
     elif liq_ratio > 0.10:
         score += 1
 
-    # volume burst
+    # volume burst plus sensible
     burst = False
     if v1 > 0 and (v5 * 10) > (0.25 * v1) and tx5 >= 6:
         score += 2
         reasons.append("volume 5m accélère")
         burst = True
-    elif v5 > 10_000 and tx5 >= 8:
+    elif v5 > 8_000 and tx5 >= 6:
         score += 1
         reasons.append("activité 5m monte")
 
-    if v24 > 300_000:
+    if v24 > 250_000:
         score += 2
         reasons.append("volume 24h solide")
-    elif v24 > 100_000:
+    elif v24 > 80_000:
         score += 1
 
     # buy pressure
     if br5 > 0.60:
         score += 2
-        reasons.append("plus d'acheteurs que de vendeurs")
+        reasons.append("acheteurs dominants")
     elif br5 > 0.53:
         score += 1
 
-    # transactions burst
-    if tx5 >= 20:
+    # tx burst
+    if tx5 >= 18:
         score += 2
-    elif tx5 >= 10:
+    elif tx5 >= 8:
         score += 1
 
-    if tx1 > 0 and tx5 > 0 and tx5 * 12 > 0.25 * tx1:
+    if tx1 > 0 and tx5 > 0 and tx5 * 12 > 0.20 * tx1:
         score += 1
         if not burst:
             reasons.append("transactions accélèrent")
@@ -465,20 +506,19 @@ def compute_score(candidate, profile, boosted):
         reasons.append("site + X + communauté")
     elif social_score == 2:
         score += 1
-        reasons.append("présence sociale correcte")
 
-    # Dex boosts
+    # boost Dex
     if candidate["token_address"] in boosted:
         score += 1
         reasons.append("boost DexScreener")
 
-    # early launchpad / pump-like
+    # radar pump / launch
     if "pump" in candidate["dex_id"] or "launch" in candidate["dex_id"]:
         score += 1
-        reasons.append("très early launchpad")
+        reasons.append("launchpad early")
 
-    # age sweet spot
-    if age is not None and 5 <= age <= 120:
+    # sweet spot d’âge
+    if age is not None and 4 <= age <= 180:
         score += 1
 
     return min(score, 10), reasons
@@ -537,9 +577,9 @@ def main():
 
     profiles = fetch_dex_profiles()
     boosted = fetch_dex_boosts()
-    pools = fetch_gecko_new_pools()
+    pools = fetch_gecko_new_pools_batched()
 
-    print(f"Fetched {len(pools)} new pools")
+    print(f"Checked {len(pools)} pools")
 
     alerts = []
 
@@ -547,8 +587,7 @@ def main():
         token_addr = candidate["token_address"]
         profile = profiles.get(token_addr, {})
 
-        reject, _ = rug_reject(candidate, profile)
-        if reject:
+        if rug_reject(candidate, profile):
             continue
 
         score, reasons = compute_score(candidate, profile, boosted)
