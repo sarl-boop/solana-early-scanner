@@ -1,13 +1,17 @@
-name: Crypto Scanner
+name: Crypto Scanner Live
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
+    concurrency:
+      group: crypto-scanner-live
+      cancel-in-progress: true
 
     steps:
       - name: Checkout repo
@@ -19,10 +23,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install -r requirements.txt
+
+      - name: Ensure state.json exists
+        run: |
+          if [ ! -f state.json ]; then
+            echo '{"tokens":{},"alerted":{},"last_heartbeat":0}' > state.json
+          fi
 
       - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          OWNED_TOKENS: ${{ secrets.OWNED_TOKENS }}
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          SMART_WALLETS: ${{ secrets.SMART_WALLETS }}
         run: python scanner.py
