@@ -429,20 +429,13 @@ def rug_reject(candidate, profile):
     if br5 < 0.45:
         return True
 
-    # socials pas encore enrichis ? on laisse passer
-    # seulement si l'activité est déjà correcte
     if socials_quality(profile) == 0 and (v24 < 40_000 or tx5 < 8):
         return True
 
     return False
 
 # =========================
-# SCORE
-# =========================
-
-def 
-# =========================
-# MOMENTUM RADAR
+# V4 ULTRA RADARS
 # =========================
 
 def momentum_signal(candidate):
@@ -452,15 +445,8 @@ def momentum_signal(candidate):
     if v1 <= 0:
         return False
 
-    if v5 * 12 > v1 * 0.30 and v5 > 6000:
-        return True
+    return v5 * 12 > v1 * 0.30 and v5 > 6000
 
-    return False
-
-
-# =========================
-# HOLDER BURST RADAR
-# =========================
 
 def holder_burst(candidate):
     tx5 = candidate["tx_5m"]
@@ -469,28 +455,21 @@ def holder_burst(candidate):
     if tx1 <= 0:
         return False
 
-    if tx5 >= 10 and tx5 * 10 > tx1 * 0.25:
-        return True
+    return tx5 >= 10 and tx5 * 10 > tx1 * 0.25
 
-    return False
-
-
-# =========================
-# PUMPFUN STYLE RADAR
-# =========================
 
 def pumpfun_style(candidate):
-
     dex = candidate["dex_id"]
     mc = candidate["market_cap"]
     liq = candidate["liquidity"]
 
-    if "pump" in dex and mc < 300000 and liq > 20000:
-        return True
+    return "pump" in dex and mc < 300_000 and liq > 20_000
 
-    return False
-    
-compute_score(candidate, profile, boosted, takeovers):
+# =========================
+# SCORE
+# =========================
+
+def compute_score(candidate, profile, boosted, takeovers):
     mc = candidate["market_cap"]
     liq = candidate["liquidity"]
     v5 = candidate["volume_5m"]
@@ -564,7 +543,7 @@ compute_score(candidate, profile, boosted, takeovers):
         if not burst:
             reasons.append("transactions accélèrent")
 
-    # Socials : bonus, pas mur absolu
+    # Socials
     social_score = socials_quality(profile)
     if social_score >= 3:
         score += 2
@@ -579,7 +558,7 @@ compute_score(candidate, profile, boosted, takeovers):
         score += 1
         reasons.append("boost DexScreener")
 
-    # Community takeover = vrai signal batch supplémentaire
+    # Community takeover
     if token_addr in takeovers:
         score += 1
         reasons.append("community takeover")
@@ -592,21 +571,19 @@ compute_score(candidate, profile, boosted, takeovers):
     # Sweet spot d’âge
     if age is not None and 4 <= age <= 180:
         score += 1
-        
-        # momentum radar
-if momentum_signal(candidate):
-    score += 1
-    reasons.append("momentum radar")
 
-# holder burst radar
-if holder_burst(candidate):
-    score += 1
-    reasons.append("holder burst")
+    # V4 ULTRA bonuses
+    if momentum_signal(candidate):
+        score += 1
+        reasons.append("momentum radar")
 
-# pumpfun early radar
-if pumpfun_style(candidate):
-    score += 1
-    reasons.append("pump.fun early")
+    if holder_burst(candidate):
+        score += 1
+        reasons.append("holder burst")
+
+    if pumpfun_style(candidate):
+        score += 1
+        reasons.append("pump.fun early")
 
     return min(score, 10), reasons
 
