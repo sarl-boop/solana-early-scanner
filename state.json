@@ -1,4 +1,5 @@
 {
-  "last_status_ts": 0,
-  "alerted": {}
+  "tokens": {},
+  "alerted": {},
+  "last_heartbeat": 0
 }
