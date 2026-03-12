@@ -35,7 +35,7 @@ MAX_MARKET_CAP = 5_000_000
 MIN_LIQUIDITY = 15_000
 MIN_LIQ_TO_MC_RATIO = 0.40
 WASH_RATIO_LIMIT = 35.0
-NO_CHASE_MULTIPLIER = 3.0
+NO_CHASE_MULTIPLIER = 2.2
 
 GOLD_SCORE = 8
 GREEN_SCORE = 6
@@ -240,13 +240,13 @@ def get_holder_stats(mint: str) -> dict:
     soft_penalty = False
 
     # anti dev wallet / concentration
-    if top1_pct > 0.20:
+    if top1_pct > 0.15:
         hard_reject = True
-    if top3_pct > 0.40:
+    if top3_pct > 0.35:
         hard_reject = True
 
     # softer concentration warning
-    if top1_pct > 0.12 or top3_pct > 0.30:
+    if top1_pct > 0.08 or top3_pct > 0.22:
         soft_penalty = True
 
     return {
