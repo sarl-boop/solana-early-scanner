@@ -805,4 +805,12 @@ async def main():
 
     await asyncio.gather(
         websocket_loop(),
-        gecko_new_pools_loop
+        gecko_new_pools_loop(),
+        evaluator_loop(),
+        save_loop(),
+        heartbeat_loop(),
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
