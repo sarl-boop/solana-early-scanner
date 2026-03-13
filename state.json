@@ -1,5 +1,6 @@
 {
   "tokens": {},
   "alerted": {},
-  "last_heartbeat": 0
+  "last_heartbeat": 0,
+  "buy_alert_history": []
 }
