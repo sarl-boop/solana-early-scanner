@@ -33,7 +33,10 @@ HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
 GECKO_REFRESH_SECONDS = 15
-TOKEN_TTL_SECONDS = 48 * 3600
+
+# IMPORTANT: réduction forte de la mémoire
+TOKEN_TTL_SECONDS = 2 * 3600
+
 ALERT_COOLDOWN_SECONDS = 12 * 3600
 
 MAX_MARKET_CAP = 5_000_000
@@ -729,9 +732,10 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
     if not can_send_buy_alert():
         return "IGNORE"
 
+    # IMPORTANT: GOLD-A plus dur
     priority = compute_priority(pair, token_state, holder_stats, score)
 
-    if priority >= 7:
+    if priority >= 8:
         return "GOLD-A"
     return "GOLD-B"
 
@@ -929,9 +933,14 @@ def evaluate_token(mint: str) -> None:
     if v1 > 0 and v5 > v1 * 0.6:
         return
 
+    # IMPORTANT: Gecko seul ne doit pas rester longtemps
+    if token_state.get("source") == "gecko_new_pool" and age_min > 12:
+        return
+
     holder_stats = get_holder_stats(mint)
 
-    if not holder_stats.get("enabled") and mc > 75_000:
+    # IMPORTANT: holders obligatoires plus tôt
+    if not holder_stats.get("enabled") and mc > 40_000:
         return
 
     hard_red = False
