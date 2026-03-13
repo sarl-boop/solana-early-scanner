@@ -349,8 +349,14 @@ def add_smart_wallet_hit(mint: str, wallet: str) -> None:
 # RISKS / FILTERS
 # =========================================================
 
-def coordinated_pump_risk(token_state: dict) -> bool:
+def sniper_trap_risk(token_state: dict) -> bool:
+    """
+    Détecte un pump trop concentré au tout début.
+    Si quelques wallets dominent les premiers buys, danger.
+    """
     counts = token_state.get("buy_wallet_counts", {})
+    first_buy_wallets = token_state.get("first_buy_wallets", [])
+
     if not counts:
         return False
 
@@ -358,13 +364,20 @@ def coordinated_pump_risk(token_state: dict) -> bool:
     unique_wallets = len(counts)
     biggest = max(counts.values()) if counts else 0
 
-    if total_buys < 8:
+    # pas assez de données
+    if total_buys < 6:
         return False
 
-    if biggest > 2:
+    # un wallet spam trop d'achats très tôt
+    if biggest >= 3:
         return True
 
+    # trop peu de wallets pour trop d'achats
     if total_buys >= 10 and unique_wallets <= 3:
+        return True
+
+    # les 5 premiers buyers ne sont pas assez variés
+    if len(first_buy_wallets) >= 5 and len(set(first_buy_wallets[:5])) <= 2:
         return True
 
     return False
@@ -477,9 +490,9 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
         score -= 2
         reasons.append("concentration holders")
 
-    if coordinated_pump_risk(token_state):
-        score -= 3
-        reasons.append("pump coordonné suspect")
+    if sniper_trap_risk(token_state):
+    score -= 4
+    reasons.append("sniper trap")
 
     if wash_trading_risk(v24, liq):
         score -= 3
