@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import os
 import time
@@ -26,6 +27,7 @@ DEX_TOKEN_API = "https://api.dexscreener.com/tokens/v1/solana/"
 GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
 STATE_FILE = Path("state.json")
+ALERT_LOG_FILE = Path("alerts_log.csv")
 
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
@@ -55,7 +57,6 @@ LOCKER_KEYWORDS = [
     "dead",
 ]
 
-# IMPORTANT: gecko_new_pool retiré
 MIGRATION_SOURCES = {
     "migration",
     "raydium_pool",
@@ -182,6 +183,83 @@ def send_discord(msg: str) -> None:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
     except Exception as e:
         print("discord send error:", e)
+
+
+def ensure_alert_log_file() -> None:
+    if ALERT_LOG_FILE.exists():
+        return
+    try:
+        with ALERT_LOG_FILE.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp",
+                "alert_type",
+                "mint",
+                "name",
+                "source",
+                "score",
+                "market_cap",
+                "liquidity",
+                "first_seen_mc",
+                "max_seen_mc",
+                "age_min",
+                "top1_pct",
+                "top3_pct",
+                "migration_flag",
+                "liq_lock_hint",
+                "dev_sold",
+                "tradeability_ok",
+                "dex_url",
+            ])
+    except Exception as e:
+        print("alert log init error:", e)
+
+
+def log_alert_csv(
+    alert_type: str,
+    mint: str,
+    name: str,
+    source: str,
+    score: int,
+    market_cap: float,
+    liquidity: float,
+    first_seen_mc: float,
+    max_seen_mc: float,
+    age_min: float,
+    top1_pct: float,
+    top3_pct: float,
+    migration_flag: bool,
+    liq_lock_hint: bool,
+    dev_sold: bool,
+    tradeability_ok: bool,
+    dex_url: str,
+) -> None:
+    try:
+        ensure_alert_log_file()
+        with ALERT_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                now_ts(),
+                alert_type,
+                mint,
+                name,
+                source,
+                score,
+                round(market_cap, 2),
+                round(liquidity, 2),
+                round(first_seen_mc, 2),
+                round(max_seen_mc, 2),
+                round(age_min, 2),
+                round(top1_pct, 4),
+                round(top3_pct, 4),
+                migration_flag,
+                liq_lock_hint,
+                dev_sold,
+                tradeability_ok,
+                dex_url,
+            ])
+    except Exception as e:
+        print("alert log write error:", e)
 
 
 def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unknown") -> dict:
@@ -853,7 +931,6 @@ def evaluate_token(mint: str) -> None:
 
     holder_stats = get_holder_stats(mint)
 
-    # Nouveau verrou : si holders inconnus et MC trop gros, on ignore
     if not holder_stats.get("enabled") and mc > 75_000:
         return
 
@@ -875,12 +952,9 @@ def evaluate_token(mint: str) -> None:
     color = classify(score, hard_red)
     alert_type = classify_alert_type(color, pair, token_state, holder_stats, score, hard_red)
 
-    dbg("evaluate_token:", mint, "score=", score, "color=", color, "alert_type=", alert_type)
-
     if alert_type == "IGNORE":
         return
 
-    # Nouveau verrou anti-doublon
     alert_key = f"BUY:{mint}" if alert_type in {"GOLD-A", "GOLD-B"} else f"SELL:{mint}"
 
     if recently_alerted(alert_key):
@@ -889,6 +963,29 @@ def evaluate_token(mint: str) -> None:
     msg = build_alert(pair, token_state, holder_stats, score, alert_type)
     send_discord(msg)
     mark_alerted(alert_key)
+
+    name = token_state.get("name") or mint[:6]
+    source = token_state.get("source", "unknown")
+    dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+    log_alert_csv(
+        alert_type=alert_type,
+        mint=mint,
+        name=name,
+        source=source,
+        score=score,
+        market_cap=mc,
+        liquidity=liq,
+        first_seen_mc=to_float(token_state.get("first_seen_mc", 0.0)),
+        max_seen_mc=to_float(token_state.get("max_seen_mc", 0.0)),
+        age_min=age_min,
+        top1_pct=holder_stats.get("top1_pct", 0.0),
+        top3_pct=holder_stats.get("top3_pct", 0.0),
+        migration_flag=bool(token_state.get("migration_flag", False)),
+        liq_lock_hint=bool(token_state.get("liq_lock_hint", False)),
+        dev_sold=bool(token_state.get("dev_sold", False)),
+        tradeability_ok=bool(token_state.get("tradeability_ok", True)),
+        dex_url=dex_url,
+    )
 
     if alert_type in {"GOLD-A", "GOLD-B"}:
         mark_buy_alert_sent()
@@ -1014,6 +1111,7 @@ async def heartbeat_loop():
 async def main():
     load_state()
     cleanup_state()
+    ensure_alert_log_file()
     dbg("smart wallets loaded:", len(SMART_WALLETS))
     dbg("held tokens loaded:", len(HELD_TOKENS))
     dbg("rpc enabled:", bool(SOLANA_RPC_URL))
