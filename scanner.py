@@ -17,6 +17,9 @@ SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
 SMART_WALLETS = {
     x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
+HELD_TOKENS = {
+    x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
+}
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 DEX_TOKEN_API = "https://api.dexscreener.com/tokens/v1/solana/"
@@ -95,6 +98,15 @@ def to_float(v, default=0.0) -> float:
         return default
 
 
+def compact_k(n: float) -> str:
+    n = float(n or 0)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:.0f}"
+
+
 def load_state() -> None:
     global STATE
     if not STATE_FILE.exists():
@@ -126,9 +138,9 @@ def cleanup_state() -> None:
     now = now_ts()
 
     keep_alerted = {}
-    for mint, ts in STATE.get("alerted", {}).items():
+    for key, ts in STATE.get("alerted", {}).items():
         if now - int(ts) < 7 * 24 * 3600:
-            keep_alerted[mint] = ts
+            keep_alerted[key] = ts
     STATE["alerted"] = keep_alerted
 
     keep_tokens = {}
@@ -138,13 +150,13 @@ def cleanup_state() -> None:
     STATE["tokens"] = keep_tokens
 
 
-def recently_alerted(mint: str) -> bool:
-    ts = int(STATE.get("alerted", {}).get(mint, 0))
+def recently_alerted(alert_key: str) -> bool:
+    ts = int(STATE.get("alerted", {}).get(alert_key, 0))
     return (now_ts() - ts) < ALERT_COOLDOWN_SECONDS
 
 
-def mark_alerted(mint: str) -> None:
-    STATE["alerted"][mint] = now_ts()
+def mark_alerted(alert_key: str) -> None:
+    STATE["alerted"][alert_key] = now_ts()
 
 
 def send_discord(msg: str) -> None:
@@ -502,9 +514,7 @@ def holder_growth_burst(token_state: dict) -> bool:
 
 def coordinated_buy_burst(token_state: dict) -> bool:
     counts = token_state.get("buy_wallet_counts", {})
-    if len(counts) >= 6:
-        return True
-    return False
+    return len(counts) >= 6
 
 
 def migration_bonus(token_state: dict) -> bool:
@@ -531,6 +541,76 @@ def anti_honeypot_guard(pair: dict, token_state: dict) -> bool:
         return False
 
     return True
+
+# =========================================================
+# PRIORITY / ALERT TYPE
+# =========================================================
+
+def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: int) -> int:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
+
+    p = 0
+
+    if score >= 9:
+        p += 2
+    elif score >= 8:
+        p += 1
+
+    if age_min <= 5:
+        p += 2
+    elif age_min <= 8:
+        p += 1
+
+    if token_state.get("first_seen_mc", 0.0) > 0 and token_state.get("first_seen_mc", 0.0) < 20_000:
+        p += 2
+
+    if mc > 0 and liq >= mc:
+        p += 2
+    elif mc > 0 and liq >= mc * 0.7:
+        p += 1
+
+    if token_state.get("smart_wallet_hits"):
+        p += 2
+
+    if token_state.get("migration_flag"):
+        p += 1
+
+    if token_state.get("liq_lock_hint"):
+        p += 1
+
+    if holder_stats.get("enabled"):
+        p += 1
+
+    if token_state.get("dev_sold"):
+        p -= 3
+
+    if not token_state.get("tradeability_ok", True):
+        p -= 3
+
+    return p
+
+
+def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
+    mint = token_state["mint"]
+
+    if hard_red or color == "🔴 RED":
+        if mint in HELD_TOKENS:
+            return "RED-EXIT"
+        return "IGNORE"
+
+    if color == "🟢 GREEN":
+        return "GREEN"
+
+    priority = compute_priority(pair, token_state, holder_stats, score)
+
+    if color == "🟡 GOLD":
+        if priority >= 7:
+            return "GOLD-A"
+        return "GOLD-B"
+
+    return "IGNORE"
 
 # =========================================================
 # SCORE / CLASSIFY
@@ -648,11 +728,11 @@ def classify(score: int, hard_red: bool) -> str:
 # ALERTS
 # =========================================================
 
-def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, color: str) -> str:
+def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, color: str, alert_type: str) -> str:
     mint = token_state["mint"]
     name = token_state.get("name") or (pair.get("baseToken") or {}).get("name") or mint[:6]
-    mc = int(to_float(pair.get("marketCap") or pair.get("fdv"), 0.0))
-    liq = int(to_float((pair.get("liquidity") or {}).get("usd"), 0.0))
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     age_min = int(max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0))
     pair_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
@@ -665,32 +745,27 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
     tradeability_ok = token_state.get("tradeability_ok", True)
     migration_flag = token_state.get("migration_flag", False)
 
-    if color == "🟡 GOLD":
-        action = "Buy 50€ maintenant"
-    elif color == "🟢 GREEN":
-        action = "Buy 25€ maintenant"
+    if alert_type == "GOLD-A":
+        header = f"🟡 GOLD-A | {name}"
+        action = "Action: Buy 50€"
+    elif alert_type == "GOLD-B":
+        header = f"🟡 GOLD-B | {name}"
+        action = "Action: Buy 25€"
+    elif alert_type == "GREEN":
+        header = f"🟢 GREEN | {name}"
+        action = "Action: Watch / small size"
     else:
-        action = "Avoid / Exit"
+        header = f"🔴 RED-EXIT | {name}"
+        action = "Action: Exit / avoid"
 
     return (
-        f"{color}\n\n"
-        f"Token name: {name}\n"
-        f"Score: {score}/10\n"
-        f"Color: {color}\n"
-        f"Source: {source}\n"
-        f"Migration flag: {migration_flag}\n"
-        f"Market cap: ${mc:,}\n"
-        f"Liquidity: ${liq:,}\n"
-        f"First seen MC: ${int(token_state.get('first_seen_mc', mc)):,}\n"
-        f"Max seen MC: ${int(token_state.get('max_seen_mc', mc)):,}\n"
-        f"Age: {age_min} min\n"
-        f"Top1: {top1:.1f}%\n"
-        f"Top3: {top3:.1f}%\n"
-        f"Liquidity lock hint: {liq_lock}\n"
-        f"Dev sold: {dev_sold}\n"
-        f"Tradeability ok: {tradeability_ok}\n"
-        f"Dex: {pair_url}\n\n"
-        f"Action: {action}"
+        f"{header}\n"
+        f"Score {score}/10 | Age {age_min}m | Source {source}\n"
+        f"MC {compact_k(mc)} | Liq {compact_k(liq)} | First {compact_k(token_state.get('first_seen_mc', mc))} | Max {compact_k(token_state.get('max_seen_mc', mc))}\n"
+        f"Top1 {top1:.1f}% | Top3 {top3:.1f}%\n"
+        f"Flags: migration {'✅' if migration_flag else '❌'} | lock {'✅' if liq_lock else '❌'} | dev_sell {'✅' if dev_sold else '❌'} | trade {'✅' if tradeability_ok else '❌'}\n"
+        f"{action}\n"
+        f"Dex: <{pair_url}>"
     )
 
 # =========================================================
@@ -754,16 +829,20 @@ def evaluate_token(mint: str) -> None:
 
     score, _ = compute_score(pair, token_state, holder_stats)
     color = classify(score, hard_red)
+    alert_type = classify_alert_type(color, pair, token_state, holder_stats, score, hard_red)
 
-    dbg("evaluate_token:", mint, "score=", score, "color=", color, "hard_red=", hard_red)
+    dbg("evaluate_token:", mint, "score=", score, "color=", color, "alert_type=", alert_type, "hard_red=", hard_red)
 
-    if recently_alerted(mint):
+    if alert_type == "IGNORE":
         return
 
-    if color == "🔴 RED" or score >= GREEN_SCORE:
-        msg = build_alert(pair, token_state, holder_stats, score, color)
-        send_discord(msg)
-        mark_alerted(mint)
+    alert_key = f"{alert_type}:{mint}"
+    if recently_alerted(alert_key):
+        return
+
+    msg = build_alert(pair, token_state, holder_stats, score, color, alert_type)
+    send_discord(msg)
+    mark_alerted(alert_key)
 
 # =========================================================
 # WEBSOCKET
@@ -906,6 +985,7 @@ async def main():
     load_state()
     cleanup_state()
     dbg("smart wallets loaded:", len(SMART_WALLETS))
+    dbg("held tokens loaded:", len(HELD_TOKENS))
     dbg("rpc enabled:", bool(SOLANA_RPC_URL))
 
     await asyncio.gather(
