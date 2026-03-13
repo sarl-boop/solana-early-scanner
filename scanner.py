@@ -55,16 +55,16 @@ LOCKER_KEYWORDS = [
     "dead",
 ]
 
+# IMPORTANT: gecko_new_pool retiré
 MIGRATION_SOURCES = {
     "migration",
     "raydium_pool",
     "meteora_pool",
     "orca_pool",
-    "gecko_new_pool",
 }
 
-BUY_ALERT_WINDOW_SECONDS = 15 * 60
-MAX_BUY_ALERTS_PER_WINDOW = 3
+BUY_ALERT_WINDOW_SECONDS = 20 * 60
+MAX_BUY_ALERTS_PER_WINDOW = 2
 
 DEBUG = True
 
@@ -641,12 +641,11 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
             return "RED-EXIT"
         return "IGNORE"
 
-    # no GREEN alerts anymore
     if color != "🟡 GOLD":
         return "IGNORE"
 
     confirm_count = live_confirmation_count(pair, token_state, holder_stats)
-    if confirm_count < 2:
+    if confirm_count < 3:
         return "IGNORE"
 
     if not can_send_buy_alert():
@@ -854,6 +853,10 @@ def evaluate_token(mint: str) -> None:
 
     holder_stats = get_holder_stats(mint)
 
+    # Nouveau verrou : si holders inconnus et MC trop gros, on ignore
+    if not holder_stats.get("enabled") and mc > 75_000:
+        return
+
     hard_red = False
     if holder_stats.get("hard_reject", False):
         hard_red = True
@@ -877,7 +880,9 @@ def evaluate_token(mint: str) -> None:
     if alert_type == "IGNORE":
         return
 
-    alert_key = f"{alert_type}:{mint}"
+    # Nouveau verrou anti-doublon
+    alert_key = f"BUY:{mint}" if alert_type in {"GOLD-A", "GOLD-B"} else f"SELL:{mint}"
+
     if recently_alerted(alert_key):
         return
 
