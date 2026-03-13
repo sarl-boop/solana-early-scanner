@@ -27,6 +27,7 @@ STATE_FILE = Path("state.json")
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
+GECKO_REFRESH_SECONDS = 30
 TOKEN_TTL_SECONDS = 48 * 3600
 ALERT_COOLDOWN_SECONDS = 12 * 3600
 
@@ -39,13 +40,11 @@ NO_CHASE_MULTIPLIER = 2.2
 GOLD_SCORE = 8
 GREEN_SCORE = 6
 
-# holder thresholds (strict)
 TOP1_HARD_REJECT = 0.15
 TOP3_HARD_REJECT = 0.35
 TOP1_SOFT_PENALTY = 0.08
 TOP3_SOFT_PENALTY = 0.22
 
-# DEBUG
 DEBUG = True
 
 # =========================================================
@@ -167,8 +166,8 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "first_buy_wallets": [],
         "first_buy_ts": 0,
     }
-    dbg("ensure_token created:", mint, name, symbol, source)
     STATE["tokens"][mint] = rec
+    dbg("ensure_token created:", mint, rec["name"], rec["symbol"], rec["source"])
     return rec
 
 # =========================================================
@@ -280,8 +279,71 @@ def get_best_pair(mint: str) -> Optional[dict]:
         return None
 
 # =========================================================
+# GECKO FALLBACK
+# =========================================================
+
+def fetch_gecko_new_pools() -> List[dict]:
+    try:
+        r = requests.get(
+            GECKO_NEW_POOLS,
+            params={"page": 1, "include": "base_token,dex"},
+            headers={"accept": "application/json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        out = []
+        included = data.get("included", []) or []
+        inc_map = {}
+        for obj in included:
+            inc_map[(obj.get("type"), obj.get("id"))] = obj
+
+        for pool in data.get("data", []):
+            attrs = pool.get("attributes", {}) or {}
+            rels = pool.get("relationships", {}) or {}
+
+            base_ref = (((rels.get("base_token") or {}).get("data")) or {})
+            base_obj = inc_map.get((base_ref.get("type"), base_ref.get("id")), {})
+            base_attrs = base_obj.get("attributes", {}) or {}
+
+            mint = base_attrs.get("address") or attrs.get("base_token_address")
+            if not mint:
+                continue
+
+            name = base_attrs.get("name") or attrs.get("name", "").split("/")[0].strip() or mint[:6]
+            symbol = base_attrs.get("symbol") or ""
+
+            out.append({
+                "mint": mint,
+                "name": name,
+                "symbol": symbol,
+                "source": "gecko_new_pool",
+            })
+
+        return out
+    except Exception as e:
+        dbg("gecko fetch error:", e)
+        return []
+
+# =========================================================
 # PARSING WEBSOCKET
 # =========================================================
+
+def extract_message_payload(raw: str) -> Optional[dict]:
+    try:
+        msg = json.loads(raw)
+    except Exception as e:
+        dbg("json parse failed:", e)
+        return None
+
+    if isinstance(msg, dict):
+        if isinstance(msg.get("data"), dict):
+            return msg["data"]
+        return msg
+
+    return None
+
 
 def extract_mint(msg: dict) -> Optional[str]:
     return (
@@ -360,13 +422,10 @@ def sniper_trap_risk(token_state: dict) -> bool:
 
     if total_buys < 6:
         return False
-
     if biggest >= 3:
         return True
-
     if total_buys >= 10 and unique_wallets <= 3:
         return True
-
     if len(first_buy_wallets) >= 5 and len(set(first_buy_wallets[:5])) <= 2:
         return True
 
@@ -400,7 +459,6 @@ def holder_growth_burst(token_state: dict) -> bool:
 
     if unique_early_wallets >= 6:
         return True
-
     if total_buy_wallets >= 9:
         return True
 
@@ -572,17 +630,14 @@ def evaluate_token(mint: str) -> None:
         return
     if age_min < 1:
         return
-
     if vol24 > 0 and v5 > vol24 * 0.4:
         return
-
     if v1 > 0 and v5 > v1 * 0.6:
         return
 
     holder_stats = get_holder_stats(mint)
 
     hard_red = False
-
     if holder_stats.get("hard_reject", False):
         hard_red = True
     if fake_liquidity_risk(mc, liq):
@@ -633,35 +688,34 @@ async def websocket_loop():
                     raw = await ws.recv()
                     dbg("raw ws message:", raw[:500])
 
-                    try:
-                        msg = json.loads(raw)
-                    except Exception as e:
-                        dbg("json parse failed:", e)
+                    payload = extract_message_payload(raw)
+                    if not payload:
+                        dbg("no valid payload")
                         continue
 
-                    mint = extract_mint(msg)
+                    mint = extract_mint(payload)
                     if not mint:
-                        dbg("no mint found in message")
+                        dbg("no mint found in payload")
                         continue
 
                     dbg("mint detected:", mint)
 
-                    event_text = json.dumps(msg).lower()
+                    event_text = json.dumps(payload).lower()
 
                     if "migration" in event_text:
-                        ensure_token(mint, extract_name(msg), extract_symbol(msg), "migration")
+                        ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
                         dbg("token added from migration:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
-                    if "new" in event_text or ("name" in msg and "symbol" in msg):
-                        ensure_token(mint, extract_name(msg), extract_symbol(msg), "new_token")
+                    if "new" in event_text or ("name" in payload and "symbol" in payload):
+                        ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         dbg("token added from new token:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
-                    side = extract_side(msg)
-                    wallet = extract_wallet(msg)
+                    side = extract_side(payload)
+                    wallet = extract_wallet(payload)
 
                     if side:
                         update_trade_tracking(mint, wallet, side)
@@ -678,6 +732,33 @@ async def websocket_loop():
 # =========================================================
 # BACKGROUND LOOPS
 # =========================================================
+
+async def gecko_new_pools_loop():
+    while True:
+        try:
+            pools = fetch_gecko_new_pools()
+            dbg("gecko pools fetched:", len(pools))
+
+            added = 0
+            for item in pools:
+                mint = item["mint"]
+                existed_before = mint in STATE["tokens"]
+                ensure_token(
+                    mint,
+                    item.get("name", ""),
+                    item.get("symbol", ""),
+                    item.get("source", "gecko_new_pool"),
+                )
+                if not existed_before:
+                    added += 1
+
+            dbg("gecko tokens added this cycle:", added)
+
+        except Exception as e:
+            dbg("gecko loop error:", e)
+
+        await asyncio.sleep(GECKO_REFRESH_SECONDS)
+
 
 async def evaluator_loop():
     while True:
@@ -724,11 +805,4 @@ async def main():
 
     await asyncio.gather(
         websocket_loop(),
-        evaluator_loop(),
-        save_loop(),
-        heartbeat_loop(),
-    )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        gecko_new_pools_loop
