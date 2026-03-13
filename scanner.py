@@ -20,6 +20,7 @@ SMART_WALLETS = {
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 DEX_TOKEN_API = "https://api.dexscreener.com/tokens/v1/solana/"
+GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
 STATE_FILE = Path("state.json")
 
