@@ -27,7 +27,7 @@ STATE_FILE = Path("state.json")
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
-GECKO_REFRESH_SECONDS = 30
+GECKO_REFRESH_SECONDS = 10
 TOKEN_TTL_SECONDS = 48 * 3600
 ALERT_COOLDOWN_SECONDS = 12 * 3600
 
@@ -44,6 +44,22 @@ TOP1_HARD_REJECT = 0.15
 TOP3_HARD_REJECT = 0.35
 TOP1_SOFT_PENALTY = 0.08
 TOP3_SOFT_PENALTY = 0.22
+
+LOCKER_KEYWORDS = [
+    "locker",
+    "locked",
+    "burn",
+    "null",
+    "dead",
+]
+
+MIGRATION_SOURCES = {
+    "migration",
+    "raydium_pool",
+    "meteora_pool",
+    "orca_pool",
+    "gecko_new_pool",
+}
 
 DEBUG = True
 
@@ -147,6 +163,8 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
             rec["symbol"] = symbol
         if source and rec.get("source") == "unknown":
             rec["source"] = source
+        if source in MIGRATION_SOURCES:
+            rec["migration_flag"] = True
         rec["last_seen_ts"] = now_ts()
         dbg("ensure_token existing:", mint, rec.get("name"), rec.get("symbol"), rec.get("source"))
         return rec
@@ -163,8 +181,14 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "last_pair_url": "",
         "smart_wallet_hits": [],
         "buy_wallet_counts": {},
+        "sell_wallet_counts": {},
         "first_buy_wallets": [],
         "first_buy_ts": 0,
+        "candidate_dev_wallet": None,
+        "dev_sold": False,
+        "tradeability_ok": True,
+        "liq_lock_hint": False,
+        "migration_flag": source in MIGRATION_SOURCES,
     }
     STATE["tokens"][mint] = rec
     dbg("ensure_token created:", mint, rec["name"], rec["symbol"], rec["source"])
@@ -384,19 +408,30 @@ def extract_side(msg: dict) -> str:
 # =========================================================
 
 def update_trade_tracking(mint: str, wallet: Optional[str], side: str) -> None:
-    if not wallet or side != "buy":
+    if not wallet or side not in {"buy", "sell"}:
         return
 
     rec = ensure_token(mint)
 
-    if rec["first_buy_ts"] == 0:
-        rec["first_buy_ts"] = now_ts()
+    if side == "buy":
+        if rec["first_buy_ts"] == 0:
+            rec["first_buy_ts"] = now_ts()
 
-    counts = rec["buy_wallet_counts"]
-    counts[wallet] = counts.get(wallet, 0) + 1
+        counts = rec["buy_wallet_counts"]
+        counts[wallet] = counts.get(wallet, 0) + 1
 
-    if len(rec["first_buy_wallets"]) < 10 and wallet not in rec["first_buy_wallets"]:
-        rec["first_buy_wallets"].append(wallet)
+        if len(rec["first_buy_wallets"]) < 10 and wallet not in rec["first_buy_wallets"]:
+            rec["first_buy_wallets"].append(wallet)
+
+        if rec.get("candidate_dev_wallet") is None and len(rec["first_buy_wallets"]) <= 2:
+            rec["candidate_dev_wallet"] = wallet
+
+    elif side == "sell":
+        sell_counts = rec["sell_wallet_counts"]
+        sell_counts[wallet] = sell_counts.get(wallet, 0) + 1
+
+        if wallet and wallet == rec.get("candidate_dev_wallet"):
+            rec["dev_sold"] = True
 
 
 def add_smart_wallet_hit(mint: str, wallet: str) -> None:
@@ -464,6 +499,39 @@ def holder_growth_burst(token_state: dict) -> bool:
 
     return False
 
+
+def coordinated_buy_burst(token_state: dict) -> bool:
+    counts = token_state.get("buy_wallet_counts", {})
+    if len(counts) >= 6:
+        return True
+    return False
+
+
+def migration_bonus(token_state: dict) -> bool:
+    return bool(token_state.get("migration_flag"))
+
+
+def dev_wallet_selling_risk(token_state: dict) -> bool:
+    return bool(token_state.get("dev_sold"))
+
+
+def liquidity_lock_hint(pair: dict) -> bool:
+    text = json.dumps(pair).lower()
+    return any(k in text for k in LOCKER_KEYWORDS)
+
+
+def anti_honeypot_guard(pair: dict, token_state: dict) -> bool:
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    txs = pair.get("txns") or {}
+    m5 = txs.get("m5") or {}
+    buys = int(m5.get("buys", 0))
+    sells = int(m5.get("sells", 0))
+
+    if liq > 10_000 and buys == 0 and sells == 0:
+        return False
+
+    return True
+
 # =========================================================
 # SCORE / CLASSIFY
 # =========================================================
@@ -523,8 +591,8 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
         score += 1
 
     if token_state.get("smart_wallet_hits"):
-        score += 2
-        reasons.append("smart wallet")
+        score += 3
+        reasons.append("smart wallet x100")
 
     if age_min <= 8:
         score += 1
@@ -533,6 +601,18 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     if holder_growth_burst(token_state):
         score += 2
         reasons.append("holder growth burst")
+
+    if coordinated_buy_burst(token_state):
+        score += 2
+        reasons.append("coordinated buys")
+
+    if migration_bonus(token_state):
+        score += 1
+        reasons.append("migration / pool source")
+
+    if token_state.get("liq_lock_hint"):
+        score += 1
+        reasons.append("lock hint")
 
     if holder_stats.get("soft_penalty"):
         score -= 2
@@ -545,6 +625,14 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     if wash_trading_risk(v24, liq):
         score -= 3
         reasons.append("wash trading suspect")
+
+    if dev_wallet_selling_risk(token_state):
+        score -= 4
+        reasons.append("dev wallet selling")
+
+    if not token_state.get("tradeability_ok", True):
+        score -= 4
+        reasons.append("tradeability guard")
 
     return max(0, min(10, score)), reasons
 
@@ -571,6 +659,12 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
     top1 = holder_stats.get("top1_pct", 0.0) * 100
     top3 = holder_stats.get("top3_pct", 0.0) * 100
 
+    source = token_state.get("source", "unknown")
+    dev_sold = token_state.get("dev_sold", False)
+    liq_lock = token_state.get("liq_lock_hint", False)
+    tradeability_ok = token_state.get("tradeability_ok", True)
+    migration_flag = token_state.get("migration_flag", False)
+
     if color == "🟡 GOLD":
         action = "Buy 50€ maintenant"
     elif color == "🟢 GREEN":
@@ -583,6 +677,8 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
         f"Token name: {name}\n"
         f"Score: {score}/10\n"
         f"Color: {color}\n"
+        f"Source: {source}\n"
+        f"Migration flag: {migration_flag}\n"
         f"Market cap: ${mc:,}\n"
         f"Liquidity: ${liq:,}\n"
         f"First seen MC: ${int(token_state.get('first_seen_mc', mc)):,}\n"
@@ -590,6 +686,9 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
         f"Age: {age_min} min\n"
         f"Top1: {top1:.1f}%\n"
         f"Top3: {top3:.1f}%\n"
+        f"Liquidity lock hint: {liq_lock}\n"
+        f"Dev sold: {dev_sold}\n"
+        f"Tradeability ok: {tradeability_ok}\n"
         f"Dex: {pair_url}\n\n"
         f"Action: {action}"
     )
@@ -619,6 +718,8 @@ def evaluate_token(mint: str) -> None:
 
     token_state["last_pair_url"] = pair.get("url") or ""
     token_state["last_seen_ts"] = now_ts()
+    token_state["liq_lock_hint"] = liquidity_lock_hint(pair)
+    token_state["tradeability_ok"] = anti_honeypot_guard(pair, token_state)
 
     if token_state["first_seen_mc"] <= 0 and mc > 0:
         token_state["first_seen_mc"] = mc
@@ -645,6 +746,10 @@ def evaluate_token(mint: str) -> None:
     if no_chase_risk(token_state.get("first_seen_mc", 0.0), mc, age_min):
         hard_red = True
     if sniper_trap_risk(token_state):
+        hard_red = True
+    if dev_wallet_selling_risk(token_state):
+        hard_red = True
+    if not token_state.get("tradeability_ok", True):
         hard_red = True
 
     score, _ = compute_score(pair, token_state, holder_stats)
