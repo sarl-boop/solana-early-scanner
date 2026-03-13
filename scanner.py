@@ -44,6 +44,9 @@ TOP3_HARD_REJECT = 0.35
 TOP1_SOFT_PENALTY = 0.08
 TOP3_SOFT_PENALTY = 0.22
 
+# DEBUG
+DEBUG = True
+
 # =========================================================
 # STATE
 # =========================================================
@@ -57,6 +60,11 @@ STATE: Dict[str, Any] = {
 # =========================================================
 # UTILS
 # =========================================================
+
+def dbg(*args):
+    if DEBUG:
+        print(*args, flush=True)
+
 
 def now_ts() -> int:
     return int(time.time())
@@ -74,6 +82,7 @@ def to_float(v, default=0.0) -> float:
 def load_state() -> None:
     global STATE
     if not STATE_FILE.exists():
+        dbg("state file not found, starting fresh")
         return
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -82,6 +91,7 @@ def load_state() -> None:
             STATE.setdefault("tokens", {})
             STATE.setdefault("alerted", {})
             STATE.setdefault("last_heartbeat", 0)
+            dbg("state loaded:", len(STATE["tokens"]), "tokens,", len(STATE["alerted"]), "alerted")
     except Exception as e:
         print("state load error:", e)
 
@@ -138,6 +148,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         if source and rec.get("source") == "unknown":
             rec["source"] = source
         rec["last_seen_ts"] = now_ts()
+        dbg("ensure_token existing:", mint, rec.get("name"), rec.get("symbol"), rec.get("source"))
         return rec
 
     rec = {
@@ -155,6 +166,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "first_buy_wallets": [],
         "first_buy_ts": 0,
     }
+    dbg("ensure_token created:", mint, name, symbol, source)
     STATE["tokens"][mint] = rec
     return rec
 
@@ -249,10 +261,12 @@ def get_best_pair(mint: str) -> Optional[dict]:
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, list) or not data:
+            dbg("dex empty pairs for mint:", mint)
             return None
 
         solana_pairs = [p for p in data if p.get("chainId") == "solana"]
         if not solana_pairs:
+            dbg("dex no solana pairs for mint:", mint)
             return None
 
         solana_pairs.sort(
@@ -383,7 +397,6 @@ def holder_growth_burst(token_state: dict) -> bool:
     unique_early_wallets = len(set(first_buy_wallets))
     total_buy_wallets = len(buy_wallet_counts)
 
-    # Réglage 2 plus permissif
     if unique_early_wallets >= 6:
         return True
 
@@ -430,7 +443,6 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     elif liq >= mc * 0.5:
         score += 1
 
-    # Réglage 1 plus sensible
     if v1 > 0 and v5 * 12 > v1 * 0.24 and v5 > 3_500:
         score += 2
         reasons.append("volume 5m accélère")
@@ -448,7 +460,6 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
     if buy_ratio > 0.60:
         score += 1
 
-    # Réglage 3 plus souple
     if buys >= 7:
         score += 1
 
@@ -456,7 +467,6 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
         score += 2
         reasons.append("smart wallet")
 
-    # Réglage 3 plus souple
     if age_min <= 8:
         score += 1
         reasons.append("très early")
@@ -562,7 +572,6 @@ def evaluate_token(mint: str) -> None:
     if age_min < 1:
         return
 
-    # anti faux spikes
     if vol24 > 0 and v5 > vol24 * 0.4:
         return
 
@@ -585,6 +594,8 @@ def evaluate_token(mint: str) -> None:
     score, _ = compute_score(pair, token_state, holder_stats)
     color = classify(score, hard_red)
 
+    dbg("evaluate_token:", mint, "score=", score, "color=", color, "hard_red=", hard_red)
+
     if recently_alerted(mint):
         return
 
@@ -602,13 +613,14 @@ async def subscribe(ws, method: str, keys: Optional[List[str]] = None):
     if keys:
         payload["keys"] = keys
     await ws.send(json.dumps(payload))
+    dbg("subscribed:", method, keys if keys else "")
 
 
 async def websocket_loop():
     while True:
         try:
             async with websockets.connect(PUMPPORTAL_WS, ping_interval=20, ping_timeout=20) as ws:
-                print("connected to PumpPortal")
+                dbg("connected to PumpPortal")
 
                 await subscribe(ws, "subscribeNewToken")
                 await subscribe(ws, "subscribeMigration")
@@ -618,21 +630,32 @@ async def websocket_loop():
 
                 while True:
                     raw = await ws.recv()
-                    msg = json.loads(raw)
+                    dbg("raw ws message:", raw[:500])
+
+                    try:
+                        msg = json.loads(raw)
+                    except Exception as e:
+                        dbg("json parse failed:", e)
+                        continue
 
                     mint = extract_mint(msg)
                     if not mint:
+                        dbg("no mint found in message")
                         continue
+
+                    dbg("mint detected:", mint)
 
                     event_text = json.dumps(msg).lower()
 
                     if "migration" in event_text:
                         ensure_token(mint, extract_name(msg), extract_symbol(msg), "migration")
+                        dbg("token added from migration:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
                     if "new" in event_text or ("name" in msg and "symbol" in msg):
                         ensure_token(mint, extract_name(msg), extract_symbol(msg), "new_token")
+                        dbg("token added from new token:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
@@ -641,8 +664,11 @@ async def websocket_loop():
 
                     if side:
                         update_trade_tracking(mint, wallet, side)
+                        dbg("trade tracked:", mint, side, wallet)
+
                         if wallet and wallet in SMART_WALLETS:
                             add_smart_wallet_hit(mint, wallet)
+                            dbg("smart wallet hit:", wallet, mint)
 
         except Exception as e:
             print("websocket error, reconnecting:", e)
@@ -656,6 +682,7 @@ async def evaluator_loop():
     while True:
         try:
             cleanup_state()
+            dbg("evaluator loop tracked tokens:", len(STATE.get("tokens", {})))
             for mint in list(STATE.get("tokens", {}).keys()):
                 evaluate_token(mint)
         except Exception as e:
@@ -676,6 +703,7 @@ async def heartbeat_loop():
             now = now_ts()
             if now - int(STATE.get("last_heartbeat", 0)) >= HEARTBEAT_INTERVAL_SECONDS:
                 tracked = len(STATE.get("tokens", {}))
+                dbg("heartbeat tracked tokens:", tracked)
                 send_discord(f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — no action signal")
                 STATE["last_heartbeat"] = now
         except Exception as e:
@@ -690,8 +718,8 @@ async def heartbeat_loop():
 async def main():
     load_state()
     cleanup_state()
-    print("smart wallets loaded:", len(SMART_WALLETS))
-    print("rpc enabled:", bool(SOLANA_RPC_URL))
+    dbg("smart wallets loaded:", len(SMART_WALLETS))
+    dbg("rpc enabled:", bool(SOLANA_RPC_URL))
 
     await asyncio.gather(
         websocket_loop(),
