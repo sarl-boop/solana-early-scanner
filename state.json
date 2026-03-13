@@ -2,5 +2,8 @@
   "tokens": {},
   "alerted": {},
   "last_heartbeat": 0,
-  "buy_alert_history": []
+  "buy_alert_history": [],
+  "paper_positions": {},
+  "wallet_stats": {},
+  "alpha_discovered_wallets": []
 }
