@@ -594,12 +594,14 @@ def evaluate_token(mint: str) -> None:
 
     hard_red = False
 
-    if holder_stats.get("hard_reject", False):
-        hard_red = True
-    if fake_liquidity_risk(mc, liq):
-        hard_red = True
-    if no_chase_risk(token_state.get("first_seen_mc", 0.0), mc, age_min):
-        hard_red = True
+if holder_stats.get("hard_reject", False):
+    hard_red = True
+if fake_liquidity_risk(mc, liq):
+    hard_red = True
+if no_chase_risk(token_state.get("first_seen_mc", 0.0), mc, age_min):
+    hard_red = True
+if sniper_trap_risk(token_state):
+    hard_red = True
 
     score, _ = compute_score(pair, token_state, holder_stats)
     color = classify(score, hard_red)
