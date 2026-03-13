@@ -30,18 +30,17 @@ STATE_FILE = Path("state.json")
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
-GECKO_REFRESH_SECONDS = 10
+GECKO_REFRESH_SECONDS = 15
 TOKEN_TTL_SECONDS = 48 * 3600
 ALERT_COOLDOWN_SECONDS = 12 * 3600
 
 MAX_MARKET_CAP = 5_000_000
 MIN_LIQUIDITY = 15_000
-MIN_LIQ_TO_MC_RATIO = 0.40
+MIN_LIQ_TO_MC_RATIO = 0.50
 WASH_RATIO_LIMIT = 35.0
-NO_CHASE_MULTIPLIER = 2.2
+NO_CHASE_MULTIPLIER = 2.0
 
 GOLD_SCORE = 8
-GREEN_SCORE = 6
 
 TOP1_HARD_REJECT = 0.15
 TOP3_HARD_REJECT = 0.35
@@ -64,6 +63,9 @@ MIGRATION_SOURCES = {
     "gecko_new_pool",
 }
 
+BUY_ALERT_WINDOW_SECONDS = 15 * 60
+MAX_BUY_ALERTS_PER_WINDOW = 3
+
 DEBUG = True
 
 # =========================================================
@@ -74,6 +76,7 @@ STATE: Dict[str, Any] = {
     "tokens": {},
     "alerted": {},
     "last_heartbeat": 0,
+    "buy_alert_history": [],
 }
 
 # =========================================================
@@ -119,6 +122,7 @@ def load_state() -> None:
             STATE.setdefault("tokens", {})
             STATE.setdefault("alerted", {})
             STATE.setdefault("last_heartbeat", 0)
+            STATE.setdefault("buy_alert_history", [])
             dbg("state loaded:", len(STATE["tokens"]), "tokens,", len(STATE["alerted"]), "alerted")
     except Exception as e:
         print("state load error:", e)
@@ -149,6 +153,11 @@ def cleanup_state() -> None:
             keep_tokens[mint] = rec
     STATE["tokens"] = keep_tokens
 
+    STATE["buy_alert_history"] = [
+        int(ts) for ts in STATE.get("buy_alert_history", [])
+        if now - int(ts) < BUY_ALERT_WINDOW_SECONDS
+    ]
+
 
 def recently_alerted(alert_key: str) -> bool:
     ts = int(STATE.get("alerted", {}).get(alert_key, 0))
@@ -157,6 +166,15 @@ def recently_alerted(alert_key: str) -> bool:
 
 def mark_alerted(alert_key: str) -> None:
     STATE["alerted"][alert_key] = now_ts()
+
+
+def can_send_buy_alert() -> bool:
+    cleanup_state()
+    return len(STATE.get("buy_alert_history", [])) < MAX_BUY_ALERTS_PER_WINDOW
+
+
+def mark_buy_alert_sent() -> None:
+    STATE.setdefault("buy_alert_history", []).append(now_ts())
 
 
 def send_discord(msg: str) -> None:
@@ -178,7 +196,6 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         if source in MIGRATION_SOURCES:
             rec["migration_flag"] = True
         rec["last_seen_ts"] = now_ts()
-        dbg("ensure_token existing:", mint, rec.get("name"), rec.get("symbol"), rec.get("source"))
         return rec
 
     rec = {
@@ -203,7 +220,6 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "migration_flag": source in MIGRATION_SOURCES,
     }
     STATE["tokens"][mint] = rec
-    dbg("ensure_token created:", mint, rec["name"], rec["symbol"], rec["source"])
     return rec
 
 # =========================================================
@@ -297,12 +313,10 @@ def get_best_pair(mint: str) -> Optional[dict]:
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, list) or not data:
-            dbg("dex empty pairs for mint:", mint)
             return None
 
         solana_pairs = [p for p in data if p.get("chainId") == "solana"]
         if not solana_pairs:
-            dbg("dex no solana pairs for mint:", mint)
             return None
 
         solana_pairs.sort(
@@ -369,8 +383,7 @@ def fetch_gecko_new_pools() -> List[dict]:
 def extract_message_payload(raw: str) -> Optional[dict]:
     try:
         msg = json.loads(raw)
-    except Exception as e:
-        dbg("json parse failed:", e)
+    except Exception:
         return None
 
     if isinstance(msg, dict):
@@ -513,8 +526,7 @@ def holder_growth_burst(token_state: dict) -> bool:
 
 
 def coordinated_buy_burst(token_state: dict) -> bool:
-    counts = token_state.get("buy_wallet_counts", {})
-    return len(counts) >= 6
+    return len(token_state.get("buy_wallet_counts", {})) >= 6
 
 
 def migration_bonus(token_state: dict) -> bool:
@@ -541,6 +553,35 @@ def anti_honeypot_guard(pair: dict, token_state: dict) -> bool:
         return False
 
     return True
+
+
+def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -> int:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    txs = pair.get("txns") or {}
+    m5 = txs.get("m5") or {}
+    buys = int(m5.get("buys", 0))
+    sells = int(m5.get("sells", 0))
+    total = buys + sells
+
+    count = 0
+
+    if liq > 0 and mc > 0 and liq >= mc * 0.6:
+        count += 1
+
+    if total >= 8 and buys > sells:
+        count += 1
+
+    if token_state.get("smart_wallet_hits"):
+        count += 1
+
+    if token_state.get("migration_flag"):
+        count += 1
+
+    if holder_stats.get("enabled"):
+        count += 1
+
+    return count
 
 # =========================================================
 # PRIORITY / ALERT TYPE
@@ -600,17 +641,22 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
             return "RED-EXIT"
         return "IGNORE"
 
-    if color == "🟢 GREEN":
-        return "GREEN"
+    # no GREEN alerts anymore
+    if color != "🟡 GOLD":
+        return "IGNORE"
+
+    confirm_count = live_confirmation_count(pair, token_state, holder_stats)
+    if confirm_count < 2:
+        return "IGNORE"
+
+    if not can_send_buy_alert():
+        return "IGNORE"
 
     priority = compute_priority(pair, token_state, holder_stats, score)
 
-    if color == "🟡 GOLD":
-        if priority >= 7:
-            return "GOLD-A"
-        return "GOLD-B"
-
-    return "IGNORE"
+    if priority >= 7:
+        return "GOLD-A"
+    return "GOLD-B"
 
 # =========================================================
 # SCORE / CLASSIFY
@@ -640,29 +686,29 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
 
     if mc < 50_000:
         score += 2
-        reasons.append("micro-cap basse")
+        reasons.append("micro-cap low")
     elif mc < 200_000:
         score += 1
 
     if liq >= mc * 0.7:
         score += 2
-        reasons.append("liquidité forte")
+        reasons.append("strong liquidity")
     elif liq >= mc * 0.5:
         score += 1
 
     if v1 > 0 and v5 * 12 > v1 * 0.24 and v5 > 3_500:
         score += 2
-        reasons.append("volume 5m accélère")
+        reasons.append("volume accelerating")
     elif v5 > 6_000:
         score += 1
 
     if v1 > 0 and v5 * 12 > v1 * 0.24:
         score += 1
-        reasons.append("momentum confirmé")
+        reasons.append("momentum confirmed")
 
     if buys > sells:
         score += 1
-        reasons.append("acheteurs dominants")
+        reasons.append("buyers stronger")
 
     if buy_ratio > 0.60:
         score += 1
@@ -672,15 +718,15 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
 
     if token_state.get("smart_wallet_hits"):
         score += 3
-        reasons.append("smart wallet x100")
+        reasons.append("smart wallet")
 
     if age_min <= 8:
         score += 1
-        reasons.append("très early")
+        reasons.append("very early")
 
     if holder_growth_burst(token_state):
         score += 2
-        reasons.append("holder growth burst")
+        reasons.append("holder burst")
 
     if coordinated_buy_burst(token_state):
         score += 2
@@ -688,7 +734,7 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
 
     if migration_bonus(token_state):
         score += 1
-        reasons.append("migration / pool source")
+        reasons.append("pool / migration source")
 
     if token_state.get("liq_lock_hint"):
         score += 1
@@ -696,7 +742,7 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
 
     if holder_stats.get("soft_penalty"):
         score -= 2
-        reasons.append("concentration holders")
+        reasons.append("holder concentration")
 
     if sniper_trap_risk(token_state):
         score -= 4
@@ -704,31 +750,29 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> (int, Li
 
     if wash_trading_risk(v24, liq):
         score -= 3
-        reasons.append("wash trading suspect")
+        reasons.append("wash trading")
 
     if dev_wallet_selling_risk(token_state):
         score -= 4
-        reasons.append("dev wallet selling")
+        reasons.append("dev selling")
 
     if not token_state.get("tradeability_ok", True):
         score -= 4
-        reasons.append("tradeability guard")
+        reasons.append("trade issue")
 
     return max(0, min(10, score)), reasons
 
 
 def classify(score: int, hard_red: bool) -> str:
-    if hard_red or score < GREEN_SCORE:
+    if hard_red or score < GOLD_SCORE:
         return "🔴 RED"
-    if score >= GOLD_SCORE:
-        return "🟡 GOLD"
-    return "🟢 GREEN"
+    return "🟡 GOLD"
 
 # =========================================================
 # ALERTS
 # =========================================================
 
-def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, color: str, alert_type: str) -> str:
+def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, alert_type: str) -> str:
     mint = token_state["mint"]
     name = token_state.get("name") or (pair.get("baseToken") or {}).get("name") or mint[:6]
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
@@ -747,16 +791,13 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
 
     if alert_type == "GOLD-A":
         header = f"🟡 GOLD-A | {name}"
-        action = "Action: Buy 50€"
+        action = "Buy 50€"
     elif alert_type == "GOLD-B":
         header = f"🟡 GOLD-B | {name}"
-        action = "Action: Buy 25€"
-    elif alert_type == "GREEN":
-        header = f"🟢 GREEN | {name}"
-        action = "Action: Watch / small size"
+        action = "Buy 25€"
     else:
-        header = f"🔴 RED-EXIT | {name}"
-        action = "Action: Exit / avoid"
+        header = f"🔴 RED | {name}"
+        action = "Sell"
 
     return (
         f"{header}\n"
@@ -764,7 +805,7 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, c
         f"MC {compact_k(mc)} | Liq {compact_k(liq)} | First {compact_k(token_state.get('first_seen_mc', mc))} | Max {compact_k(token_state.get('max_seen_mc', mc))}\n"
         f"Top1 {top1:.1f}% | Top3 {top3:.1f}%\n"
         f"Flags: migration {'✅' if migration_flag else '❌'} | lock {'✅' if liq_lock else '❌'} | dev_sell {'✅' if dev_sold else '❌'} | trade {'✅' if tradeability_ok else '❌'}\n"
-        f"{action}\n"
+        f"Action: {action}\n"
         f"Dex: <{pair_url}>"
     )
 
@@ -831,7 +872,7 @@ def evaluate_token(mint: str) -> None:
     color = classify(score, hard_red)
     alert_type = classify_alert_type(color, pair, token_state, holder_stats, score, hard_red)
 
-    dbg("evaluate_token:", mint, "score=", score, "color=", color, "alert_type=", alert_type, "hard_red=", hard_red)
+    dbg("evaluate_token:", mint, "score=", score, "color=", color, "alert_type=", alert_type)
 
     if alert_type == "IGNORE":
         return
@@ -840,9 +881,12 @@ def evaluate_token(mint: str) -> None:
     if recently_alerted(alert_key):
         return
 
-    msg = build_alert(pair, token_state, holder_stats, score, color, alert_type)
+    msg = build_alert(pair, token_state, holder_stats, score, alert_type)
     send_discord(msg)
     mark_alerted(alert_key)
+
+    if alert_type in {"GOLD-A", "GOLD-B"}:
+        mark_buy_alert_sent()
 
 # =========================================================
 # WEBSOCKET
@@ -870,31 +914,24 @@ async def websocket_loop():
 
                 while True:
                     raw = await ws.recv()
-                    dbg("raw ws message:", raw[:500])
 
                     payload = extract_message_payload(raw)
                     if not payload:
-                        dbg("no valid payload")
                         continue
 
                     mint = extract_mint(payload)
                     if not mint:
-                        dbg("no mint found in payload")
                         continue
-
-                    dbg("mint detected:", mint)
 
                     event_text = json.dumps(payload).lower()
 
                     if "migration" in event_text:
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
-                        dbg("token added from migration:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
                     if "new" in event_text or ("name" in payload and "symbol" in payload):
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
-                        dbg("token added from new token:", mint)
                         await subscribe(ws, "subscribeTokenTrade", [mint])
                         continue
 
@@ -903,11 +940,9 @@ async def websocket_loop():
 
                     if side:
                         update_trade_tracking(mint, wallet, side)
-                        dbg("trade tracked:", mint, side, wallet)
 
                         if wallet and wallet in SMART_WALLETS:
                             add_smart_wallet_hit(mint, wallet)
-                            dbg("smart wallet hit:", wallet, mint)
 
         except Exception as e:
             print("websocket error, reconnecting:", e)
@@ -921,22 +956,14 @@ async def gecko_new_pools_loop():
     while True:
         try:
             pools = fetch_gecko_new_pools()
-            dbg("gecko pools fetched:", len(pools))
 
-            added = 0
             for item in pools:
-                mint = item["mint"]
-                existed_before = mint in STATE["tokens"]
                 ensure_token(
-                    mint,
+                    item["mint"],
                     item.get("name", ""),
                     item.get("symbol", ""),
                     item.get("source", "gecko_new_pool"),
                 )
-                if not existed_before:
-                    added += 1
-
-            dbg("gecko tokens added this cycle:", added)
 
         except Exception as e:
             dbg("gecko loop error:", e)
@@ -948,7 +975,6 @@ async def evaluator_loop():
     while True:
         try:
             cleanup_state()
-            dbg("evaluator loop tracked tokens:", len(STATE.get("tokens", {})))
             for mint in list(STATE.get("tokens", {}).keys()):
                 evaluate_token(mint)
         except Exception as e:
@@ -969,7 +995,6 @@ async def heartbeat_loop():
             now = now_ts()
             if now - int(STATE.get("last_heartbeat", 0)) >= HEARTBEAT_INTERVAL_SECONDS:
                 tracked = len(STATE.get("tokens", {}))
-                dbg("heartbeat tracked tokens:", tracked)
                 send_discord(f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — no action signal")
                 STATE["last_heartbeat"] = now
         except Exception as e:
