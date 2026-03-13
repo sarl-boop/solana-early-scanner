@@ -16,12 +16,10 @@ import websockets
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
 
-# Smart / alpha wallets manuels
 SMART_WALLETS = {
     x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
 
-# Optionnel: seulement si tu détiens déjà des tokens
 HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
@@ -32,16 +30,19 @@ GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pool
 
 STATE_FILE = Path("state.json")
 ALERT_LOG_FILE = Path("alerts_log.csv")
-PAPER_TRADE_LOG_FILE = Path("paper_trades_log.csv")
+PAPER_LOG_FILE = Path("paper_trades_log.csv")
 
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
 GECKO_REFRESH_SECONDS = 20
-PAPER_CHECK_INTERVAL_SECONDS = 300  # 5 min
+PAPER_CHECK_INTERVAL_SECONDS = 300
 
 TOKEN_TTL_SECONDS = 2 * 3600
 ALERT_COOLDOWN_SECONDS = 12 * 3600
+
+BUY_ALERT_WINDOW_SECONDS = 20 * 60
+MAX_BUY_ALERTS_PER_WINDOW = 2
 
 MAX_MARKET_CAP = 5_000_000
 MIN_LIQUIDITY = 15_000
@@ -56,17 +57,13 @@ TOP3_HARD_REJECT = 0.35
 TOP1_SOFT_PENALTY = 0.08
 TOP3_SOFT_PENALTY = 0.22
 
-BUY_ALERT_WINDOW_SECONDS = 20 * 60
-MAX_BUY_ALERTS_PER_WINDOW = 2
-
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
 MIGRATION_SOURCES = {"migration", "raydium_pool", "meteora_pool", "orca_pool"}
 
-# Paper trading
 PAPER_GOLD_A_SIZE_EUR = 50
 PAPER_GOLD_B_SIZE_EUR = 25
-PAPER_WINNER_ROI = 2.0       # +200%
-PAPER_STOP_ROI = -0.35       # -35% (simulé, juste pour journal/alerte)
+PAPER_WINNER_ROI = 2.0
+PAPER_STOP_ROI = -0.35
 ALPHA_MIN_TRADES = 3
 ALPHA_MIN_WIN_RATE = 0.40
 
@@ -195,7 +192,6 @@ def send_discord(msg: str) -> None:
     except Exception as e:
         print("discord send error:", e)
 
-
 # =========================================================
 # CSV LOGS
 # =========================================================
@@ -214,9 +210,9 @@ def ensure_alert_log_file() -> None:
 
 
 def ensure_paper_log_file() -> None:
-    if PAPER_TRADE_LOG_FILE.exists():
+    if PAPER_LOG_FILE.exists():
         return
-    with PAPER_TRADE_LOG_FILE.open("w", newline="", encoding="utf-8") as f:
+    with PAPER_LOG_FILE.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "timestamp", "event", "mint", "name", "paper_signal", "size_eur",
@@ -275,7 +271,7 @@ def log_paper_csv(
 ) -> None:
     try:
         ensure_paper_log_file()
-        with PAPER_TRADE_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        with PAPER_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
                 now_ts(), event, mint, name, paper_signal, size_eur,
@@ -341,7 +337,6 @@ def learned_alpha_wallets() -> Set[str]:
 def update_wallet_stats_from_winner(wallet: str) -> None:
     if not wallet:
         return
-
     stats = STATE["wallet_stats"].setdefault(wallet, {"wins": 0, "trades": 0})
     stats["wins"] = int(stats.get("wins", 0)) + 1
     stats["trades"] = int(stats.get("trades", 0)) + 1
@@ -393,8 +388,11 @@ def get_token_largest_accounts(mint: str) -> List[dict]:
 def get_holder_stats(mint: str) -> dict:
     if not SOLANA_RPC_URL:
         return {
-            "enabled": False, "top1_pct": 0.0, "top3_pct": 0.0,
-            "hard_reject": False, "soft_penalty": False,
+            "enabled": False,
+            "top1_pct": 0.0,
+            "top3_pct": 0.0,
+            "hard_reject": False,
+            "soft_penalty": False,
         }
 
     supply = get_token_supply(mint)
@@ -402,8 +400,11 @@ def get_holder_stats(mint: str) -> dict:
 
     if supply <= 0 or not largest:
         return {
-            "enabled": False, "top1_pct": 0.0, "top3_pct": 0.0,
-            "hard_reject": False, "soft_penalty": False,
+            "enabled": False,
+            "top1_pct": 0.0,
+            "top3_pct": 0.0,
+            "hard_reject": False,
+            "soft_penalty": False,
         }
 
     amounts = [to_float(x.get("uiAmount"), 0.0) for x in largest[:3]]
@@ -880,35 +881,6 @@ def open_paper_position(mint: str, token_state: dict, pair: dict, alert_type: st
     )
 
 
-def close_paper_position(mint: str, current_mc: float, reason: str) -> None:
-    pos = STATE.get("paper_positions", {}).get(mint)
-    if not pos or pos.get("status") != "OPEN":
-        return
-
-    entry_mc = to_float(pos.get("entry_mc", 0.0))
-    roi = 0.0
-    if entry_mc > 0:
-        roi = ((current_mc - entry_mc) / entry_mc) * 100.0
-
-    pos["status"] = reason
-    pos["closed_ts"] = now_ts()
-    pos["exit_mc"] = current_mc
-    pos["roi_pct"] = roi
-
-    log_paper_csv(
-        event="CLOSE",
-        mint=mint,
-        name=pos.get("name", mint[:6]),
-        paper_signal=pos.get("signal", ""),
-        size_eur=to_float(pos.get("size_eur", 0.0)),
-        entry_mc=entry_mc,
-        current_mc=current_mc,
-        roi_pct=roi,
-        source=pos.get("source", "unknown"),
-        status=reason,
-    )
-
-
 def process_paper_winner(mint: str, current_mc: float) -> None:
     pos = STATE.get("paper_positions", {}).get(mint)
     if not pos or pos.get("status") != "OPEN":
@@ -919,10 +891,7 @@ def process_paper_winner(mint: str, current_mc: float) -> None:
         return
 
     roi = (current_mc - entry_mc) / entry_mc
-    if roi < PAPER_WINNER_ROI:
-        return
-
-    if pos.get("winner_notified", False):
+    if roi < PAPER_WINNER_ROI or pos.get("winner_notified", False):
         return
 
     pos["winner_notified"] = True
@@ -958,10 +927,7 @@ def process_paper_stop(mint: str, current_mc: float) -> None:
         return
 
     roi = (current_mc - entry_mc) / entry_mc
-    if roi > PAPER_STOP_ROI:
-        return
-
-    if pos.get("stop_notified", False):
+    if roi > PAPER_STOP_ROI or pos.get("stop_notified", False):
         return
 
     pos["stop_notified"] = True
@@ -1091,13 +1057,11 @@ def evaluate_token(mint: str) -> None:
     if v1 > 0 and v5 > v1 * 0.6:
         return
 
-    # Gecko seul valable peu de temps
     if token_state.get("source") == "gecko_new_pool" and age_min > 12:
         return
 
     holder_stats = get_holder_stats(mint)
 
-    # Holders obligatoires plus tôt
     if not holder_stats.get("enabled") and mc > 40_000:
         return
 
@@ -1191,10 +1155,7 @@ async def websocket_loop():
                 await subscribe(ws, "subscribeNewToken")
                 await subscribe(ws, "subscribeMigration")
 
-                manual_alpha_wallets = set(SMART_WALLETS)
-                learned_alphas = learned_alpha_wallets()
-                all_alpha_wallets = list(manual_alpha_wallets | learned_alphas)
-
+                all_alpha_wallets = list(set(SMART_WALLETS) | learned_alpha_wallets())
                 if all_alpha_wallets:
                     await subscribe(ws, "subscribeAccountTrade", all_alpha_wallets)
 
@@ -1207,12 +1168,10 @@ async def websocket_loop():
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
-                    # Nouveau token
                     if mint and ("name" in payload and "symbol" in payload):
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         await subscribe_token_trade_once(ws, mint)
 
-                    # Migration
                     if mint and "migration" in event_text:
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
                         await subscribe_token_trade_once(ws, mint)
@@ -1228,8 +1187,8 @@ async def websocket_loop():
                     if side:
                         update_trade_tracking(mint, wallet, side, usd_est)
 
-                        alpha_wallets_live = set(SMART_WALLETS) | learned_alpha_wallets()
-                        if wallet and wallet in alpha_wallets_live:
+                        live_alpha_wallets = set(SMART_WALLETS) | learned_alpha_wallets()
+                        if wallet and wallet in live_alpha_wallets:
                             add_smart_wallet_hit(mint, wallet)
 
         except Exception as e:
@@ -1244,6 +1203,9 @@ async def gecko_new_pools_loop():
     while True:
         try:
             pools = fetch_gecko_new_pools()
+
+            # Important: on garde seulement page 1 très récente
+            # le cleanup fera le reste
             for item in pools:
                 ensure_token(
                     item["mint"],
@@ -1298,6 +1260,7 @@ async def main():
     cleanup_state()
     ensure_alert_log_file()
     ensure_paper_log_file()
+
     dbg("smart wallets loaded:", len(SMART_WALLETS))
     dbg("learned alpha wallets:", len(STATE.get("alpha_discovered_wallets", [])))
     dbg("held tokens loaded:", len(HELD_TOKENS))
