@@ -15,16 +15,24 @@ import websockets
 
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "").strip()
+PUMPPORTAL_API_KEY = os.environ.get("PUMPPORTAL_API_KEY", "").strip()
 
 SMART_WALLETS = {
     x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
 
+# Optional: only if you actually hold some tokens and want RED-EXIT on them
 HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
 
-PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+PUMPPORTAL_WS_BASE = "wss://pumpportal.fun/api/data"
+PUMPPORTAL_WS = (
+    f"{PUMPPORTAL_WS_BASE}?api-key={PUMPPORTAL_API_KEY}"
+    if PUMPPORTAL_API_KEY
+    else PUMPPORTAL_WS_BASE
+)
+
 DEX_TOKEN_API = "https://api.dexscreener.com/tokens/v1/solana/"
 GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
@@ -35,7 +43,7 @@ PAPER_LOG_FILE = Path("paper_trades_log.csv")
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
-GECKO_REFRESH_SECONDS = 20
+GECKO_REFRESH_SECONDS = 25
 PAPER_CHECK_INTERVAL_SECONDS = 300
 
 TOKEN_TTL_SECONDS = 2 * 3600
@@ -49,6 +57,8 @@ MIN_LIQUIDITY = 15_000
 MIN_LIQ_TO_MC_RATIO = 0.50
 WASH_RATIO_LIMIT = 35.0
 NO_CHASE_MULTIPLIER = 2.0
+MAX_TRACKED_TOKENS = 80
+GECKO_MAX_ADD_PER_CYCLE = 12
 
 GOLD_SCORE = 8
 
@@ -58,12 +68,11 @@ TOP1_SOFT_PENALTY = 0.08
 TOP3_SOFT_PENALTY = 0.22
 
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
-MIGRATION_SOURCES = {"migration", "raydium_pool", "meteora_pool", "orca_pool"}
 
 PAPER_GOLD_A_SIZE_EUR = 50
 PAPER_GOLD_B_SIZE_EUR = 25
-PAPER_WINNER_ROI = 2.0
-PAPER_STOP_ROI = -0.35
+PAPER_WINNER_ROI = 2.0   # +200%
+PAPER_STOP_ROI = -0.35   # -35%
 ALPHA_MIN_TRADES = 3
 ALPHA_MIN_WIN_RATE = 0.40
 
@@ -121,7 +130,6 @@ def load_state() -> None:
     if not STATE_FILE.exists():
         dbg("state file not found, starting fresh")
         return
-
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -160,7 +168,14 @@ def cleanup_state() -> None:
     for mint, rec in STATE.get("tokens", {}).items():
         if now - int(rec.get("last_seen_ts", 0)) < TOKEN_TTL_SECONDS:
             keep_tokens[mint] = rec
-    STATE["tokens"] = keep_tokens
+
+    # hard cap to avoid huge spikes living too long
+    ordered = sorted(
+        keep_tokens.items(),
+        key=lambda kv: int(kv[1].get("last_seen_ts", 0)),
+        reverse=True,
+    )
+    STATE["tokens"] = dict(ordered[:MAX_TRACKED_TOKENS])
 
     STATE["buy_alert_history"] = [
         int(ts) for ts in STATE.get("buy_alert_history", [])
@@ -191,6 +206,7 @@ def send_discord(msg: str) -> None:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
     except Exception as e:
         print("discord send error:", e)
+
 
 # =========================================================
 # CSV LOGS
@@ -294,7 +310,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
             rec["symbol"] = symbol
         if source and rec.get("source") == "unknown":
             rec["source"] = source
-        if source in MIGRATION_SOURCES:
+        if source == "migration":
             rec["migration_flag"] = True
         rec["last_seen_ts"] = now_ts()
         return rec
@@ -318,7 +334,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "dev_sold": False,
         "tradeability_ok": True,
         "liq_lock_hint": False,
-        "migration_flag": source in MIGRATION_SOURCES,
+        "migration_flag": source == "migration",
         "early_buys": 0,
         "early_sells": 0,
         "early_unique_buyers": [],
@@ -334,12 +350,18 @@ def learned_alpha_wallets() -> Set[str]:
     return set(STATE.get("alpha_discovered_wallets", []))
 
 
+def update_wallet_stats_from_trade(wallet: str) -> None:
+    if not wallet:
+        return
+    stats = STATE["wallet_stats"].setdefault(wallet, {"wins": 0, "trades": 0})
+    stats["trades"] = int(stats.get("trades", 0)) + 1
+
+
 def update_wallet_stats_from_winner(wallet: str) -> None:
     if not wallet:
         return
     stats = STATE["wallet_stats"].setdefault(wallet, {"wins": 0, "trades": 0})
     stats["wins"] = int(stats.get("wins", 0)) + 1
-    stats["trades"] = int(stats.get("trades", 0)) + 1
 
     trades = int(stats.get("trades", 0))
     wins = int(stats.get("wins", 0))
@@ -347,13 +369,6 @@ def update_wallet_stats_from_winner(wallet: str) -> None:
         alphas = set(STATE.get("alpha_discovered_wallets", []))
         alphas.add(wallet)
         STATE["alpha_discovered_wallets"] = list(alphas)
-
-
-def update_wallet_stats_from_trade(wallet: str) -> None:
-    if not wallet:
-        return
-    stats = STATE["wallet_stats"].setdefault(wallet, {"wins": 0, "trades": 0})
-    stats["trades"] = int(stats.get("trades", 0)) + 1
 
 # =========================================================
 # SOLANA RPC
@@ -433,9 +448,11 @@ def get_best_pair(mint: str) -> Optional[dict]:
         data = r.json()
         if not isinstance(data, list) or not data:
             return None
+
         solana_pairs = [p for p in data if p.get("chainId") == "solana"]
         if not solana_pairs:
             return None
+
         solana_pairs.sort(
             key=lambda x: to_float((x.get("liquidity") or {}).get("usd"), 0.0),
             reverse=True,
@@ -571,6 +588,7 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
         if len(rec["first_buy_wallets"]) < 10 and wallet not in rec["first_buy_wallets"]:
             rec["first_buy_wallets"].append(wallet)
 
+        # dev sell detector: earliest buyer as likely dev/cabal wallet
         if rec.get("candidate_dev_wallet") is None and len(rec["first_buy_wallets"]) <= 2:
             rec["candidate_dev_wallet"] = wallet
 
@@ -596,6 +614,7 @@ def add_smart_wallet_hit(mint: str, wallet: str) -> None:
     hits.add(wallet)
     rec["smart_wallet_hits"] = list(hits)
 
+    # smart wallet copy radar
     hit_count = len(rec["smart_wallet_hits"])
     if hit_count >= 4:
         rec["alpha_cluster_score"] = 5
@@ -653,7 +672,7 @@ def liquidity_lock_hint(pair: dict) -> bool:
     return any(k in text for k in LOCKER_KEYWORDS)
 
 
-def anti_honeypot_guard(pair: dict, token_state: dict) -> bool:
+def anti_honeypot_guard(pair: dict) -> bool:
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     txs = pair.get("txns") or {}
     m5 = txs.get("m5") or {}
@@ -662,6 +681,13 @@ def anti_honeypot_guard(pair: dict, token_state: dict) -> bool:
     if liq > 10_000 and buys == 0 and sells == 0:
         return False
     return True
+
+
+def holder_explosion_signal(token_state: dict) -> bool:
+    # holder explosion radar approximation using early unique buyers
+    uniq = len(token_state.get("early_unique_buyers", []))
+    age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
+    return uniq >= 8 and age_min <= 5
 
 
 def early_pump_signal(token_state: dict) -> bool:
@@ -693,6 +719,8 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 1
     if early_pump_signal(token_state):
         count += 1
+    if holder_explosion_signal(token_state):
+        count += 1
     return count
 
 
@@ -717,21 +745,25 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     score = 0
 
+    # microcap priority
     if mc < 50_000:
         score += 2
     elif mc < 200_000:
         score += 1
 
+    # liquidity strength
     if liq >= mc * 0.7:
         score += 2
     elif liq >= mc * 0.5:
         score += 1
 
+    # volume acceleration
     if v1 > 0 and v5 * 12 > v1 * 0.24 and v5 > 3500:
         score += 2
     elif v5 > 6000:
         score += 1
 
+    # buy pressure
     if buys > sells:
         score += 1
     if buy_ratio > 0.60:
@@ -739,23 +771,30 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if buys >= 7:
         score += 1
 
+    # very early
     if age_min <= 8:
         score += 1
 
+    # early radar signals
     if early_pump_signal(token_state):
         score += 2
 
-    if len(token_state.get("early_unique_buyers", [])) >= 8:
+    # holder explosion
+    if holder_explosion_signal(token_state):
         score += 2
 
+    # wallet copy / alpha cluster
     score += int(token_state.get("alpha_cluster_score", 0))
 
+    # migration
     if token_state.get("migration_flag"):
         score += 1
 
+    # liq lock hint
     if token_state.get("liq_lock_hint"):
         score += 1
 
+    # penalties
     if holder_stats.get("soft_penalty"):
         score -= 2
     if sniper_trap_risk(token_state):
@@ -776,6 +815,7 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
     age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
 
     p = 0
+
     if score >= 9:
         p += 2
     elif score >= 8:
@@ -795,6 +835,9 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
         p += 1
 
     if early_pump_signal(token_state):
+        p += 2
+
+    if holder_explosion_signal(token_state):
         p += 2
 
     smart_hits = len(token_state.get("smart_wallet_hits", []))
@@ -837,7 +880,7 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
         return "IGNORE"
 
     priority = compute_priority(pair, token_state, holder_stats, score)
-    if priority >= 8:
+    if priority >= 9:
         return "GOLD-A"
     return "GOLD-B"
 
@@ -1040,7 +1083,7 @@ def evaluate_token(mint: str) -> None:
     token_state["last_pair_url"] = pair.get("url") or ""
     token_state["last_seen_ts"] = now_ts()
     token_state["liq_lock_hint"] = liquidity_lock_hint(pair)
-    token_state["tradeability_ok"] = anti_honeypot_guard(pair, token_state)
+    token_state["tradeability_ok"] = anti_honeypot_guard(pair)
 
     if token_state["first_seen_mc"] <= 0 and mc > 0:
         token_state["first_seen_mc"] = mc
@@ -1057,6 +1100,7 @@ def evaluate_token(mint: str) -> None:
     if v1 > 0 and v5 > v1 * 0.6:
         return
 
+    # gecko-only candidates expire quickly
     if token_state.get("source") == "gecko_new_pool" and age_min > 12:
         return
 
@@ -1152,9 +1196,11 @@ async def websocket_loop():
             async with websockets.connect(PUMPPORTAL_WS, ping_interval=20, ping_timeout=20) as ws:
                 dbg("connected to PumpPortal")
 
+                # official early radar
                 await subscribe(ws, "subscribeNewToken")
                 await subscribe(ws, "subscribeMigration")
 
+                # smart wallet copy radar
                 all_alpha_wallets = list(set(SMART_WALLETS) | learned_alpha_wallets())
                 if all_alpha_wallets:
                     await subscribe(ws, "subscribeAccountTrade", all_alpha_wallets)
@@ -1168,10 +1214,12 @@ async def websocket_loop():
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
+                    # pump.fun early radar
                     if mint and ("name" in payload and "symbol" in payload):
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         await subscribe_token_trade_once(ws, mint)
 
+                    # migration radar
                     if mint and "migration" in event_text:
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
                         await subscribe_token_trade_once(ws, mint)
@@ -1196,7 +1244,7 @@ async def websocket_loop():
             await asyncio.sleep(5)
 
 # =========================================================
-# BACKGROUND LOOPS
+# GECKO LOOP (BUG FIX)
 # =========================================================
 
 async def gecko_new_pools_loop():
@@ -1204,20 +1252,49 @@ async def gecko_new_pools_loop():
         try:
             pools = fetch_gecko_new_pools()
 
-            # Important: on garde seulement page 1 très récente
-            # le cleanup fera le reste
+            added = 0
             for item in pools:
+                if added >= GECKO_MAX_ADD_PER_CYCLE:
+                    break
+
+                mint = item["mint"]
+
+                if mint in STATE["tokens"]:
+                    continue
+
+                # pre-filter BEFORE storing
+                pair = get_best_pair(mint)
+                if not pair:
+                    continue
+
+                mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+                liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+
+                if mc <= 0 or mc > MAX_MARKET_CAP:
+                    continue
+                if liq < MIN_LIQUIDITY:
+                    continue
+                if fake_liquidity_risk(mc, liq):
+                    continue
+
                 ensure_token(
-                    item["mint"],
+                    mint,
                     item.get("name", ""),
                     item.get("symbol", ""),
                     item.get("source", "gecko_new_pool"),
                 )
+                added += 1
+
+            dbg("gecko added this cycle:", added)
+
         except Exception as e:
             dbg("gecko loop error:", e)
 
         await asyncio.sleep(GECKO_REFRESH_SECONDS)
 
+# =========================================================
+# BACKGROUND LOOPS
+# =========================================================
 
 async def evaluator_loop():
     while True:
@@ -1243,8 +1320,13 @@ async def heartbeat_loop():
             now = now_ts()
             if now - int(STATE.get("last_heartbeat", 0)) >= HEARTBEAT_INTERVAL_SECONDS:
                 tracked = len(STATE.get("tokens", {}))
-                paper_open = sum(1 for p in STATE.get("paper_positions", {}).values() if p.get("status") == "OPEN")
-                send_discord(f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — paper open {paper_open} — no action signal")
+                paper_open = sum(
+                    1 for p in STATE.get("paper_positions", {}).values()
+                    if p.get("status") == "OPEN"
+                )
+                send_discord(
+                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — paper open {paper_open} — no action signal"
+                )
                 STATE["last_heartbeat"] = now
         except Exception as e:
             print("heartbeat error:", e)
@@ -1265,6 +1347,7 @@ async def main():
     dbg("learned alpha wallets:", len(STATE.get("alpha_discovered_wallets", [])))
     dbg("held tokens loaded:", len(HELD_TOKENS))
     dbg("rpc enabled:", bool(SOLANA_RPC_URL))
+    dbg("pumpportal api key enabled:", bool(PUMPPORTAL_API_KEY))
 
     await asyncio.gather(
         websocket_loop(),
