@@ -24,7 +24,6 @@ HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
 
-# Optional risk adapters
 RUGCHECK_URL = os.environ.get("RUGCHECK_URL", "").strip()
 GOPLUS_URL = os.environ.get("GOPLUS_URL", "").strip()
 HONEYPOT_URL = os.environ.get("HONEYPOT_URL", "").strip()
@@ -63,7 +62,6 @@ NO_CHASE_MULTIPLIER = 2.4
 MAX_TRACKED_TOKENS = 280
 GECKO_MAX_ADD_PER_CYCLE = 80
 
-# Stricter signal classes
 GOLD_SCORE = 9
 GREEN_SCORE = 6
 
@@ -827,7 +825,7 @@ def early_pump_signal(token_state: dict) -> bool:
     return buys >= 4 and uniq >= 3 and vol >= 400
 
 
-def momentum_only_signal(pair: dict, token_state: dict) -> bool:
+def momentum_only_signal(token_state: dict) -> bool:
     return (
         not volume_burst_signal(token_state)
         and not wallet_cluster_signal(token_state)
@@ -836,6 +834,15 @@ def momentum_only_signal(pair: dict, token_state: dict) -> bool:
         and not holder_explosion_signal(token_state)
         and len(token_state.get("smart_wallet_hits", [])) == 0
     )
+
+
+def has_real_sniper_signal(token_state: dict) -> bool:
+    return any([
+        volume_burst_signal(token_state),
+        wallet_cluster_signal(token_state),
+        liquidity_add_signal(token_state),
+        len(token_state.get("smart_wallet_hits", [])) >= 1,
+    ])
 
 
 def liquidity_quality_tier(mc: float, liq: float) -> str:
@@ -904,13 +911,11 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     score = 0
 
-    # MC
     if mc < 30_000:
         score += 2
     elif mc < 120_000:
         score += 1
 
-    # Liquidity quality stricter
     if liq_tier == "strong":
         score += 3
     elif liq_tier == "ok":
@@ -918,7 +923,6 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     else:
         score -= 2
 
-    # Basic flow
     if buys > sells:
         score += 1
     if buy_ratio > 0.55:
@@ -928,13 +932,13 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if age_min <= 15:
         score += 1
 
-    # Momentum now weaker
+    # Momentum volontairement plus faible
     if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
         score += 1
     elif v5 > 1200:
         score += 1
 
-    # Real sniper signals much stronger
+    # Vrais signaux sniper plus forts
     if early_pump_signal(token_state):
         score += 2
     if holder_explosion_signal(token_state):
@@ -957,7 +961,6 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if token_state.get("liq_lock_hint"):
         score += 1
 
-    # Penalties
     if holder_stats.get("soft_penalty"):
         score -= 2
     if sniper_trap_risk(token_state):
@@ -971,8 +974,7 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if not token_state.get("risk_ok", True):
         score -= 5
 
-    # Heavy punishment for pure momentum without real sniper confirmation
-    if momentum_only_signal(pair, token_state):
+    if momentum_only_signal(token_state):
         score -= 3
 
     return max(0, min(10, score))
@@ -983,26 +985,20 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     liq_tier = liquidity_quality_tier(mc, liq)
-
-    strong_sniper_signal = any([
-        volume_burst_signal(token_state),
-        wallet_cluster_signal(token_state),
-        liquidity_add_signal(token_state),
-        len(token_state.get("smart_wallet_hits", [])) >= 1,
-    ])
+    sniper_signal = has_real_sniper_signal(token_state)
 
     if hard_red or color == "🔴 RED":
         if mint in HELD_TOKENS:
             return "RED"
         return "IGNORE"
 
-    # GOLD is now strict
+    # GOLD très strict
     if color == "🟡 GOLD":
         if live_confirmation_count(pair, token_state, holder_stats) < 4:
             return "IGNORE"
         if liq_tier != "strong":
             return "GREEN" if can_send_buy_alert() else "IGNORE"
-        if not strong_sniper_signal:
+        if not sniper_signal:
             return "GREEN" if can_send_buy_alert() else "IGNORE"
         if not can_send_buy_alert():
             return "IGNORE"
