@@ -3,14 +3,16 @@ name: Crypto Scanner Live
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 * * * *"
+
+concurrency:
+  group: crypto-scanner-live
+  cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    concurrency:
-      group: crypto-scanner-live
-      cancel-in-progress: true
+    timeout-minutes: 55
 
     steps:
       - uses: actions/checkout@v4
@@ -29,5 +31,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
           SMART_WALLETS: ${{ secrets.SMART_WALLETS }}
+          PUMPPORTAL_API_KEY: ${{ secrets.PUMPPORTAL_API_KEY }}
+          HELD_TOKENS: ${{ secrets.HELD_TOKENS }}
         run: |
           python scanner.py
