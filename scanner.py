@@ -24,7 +24,7 @@ HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
 
-# Optional external risk adapters
+# Optional risk adapters
 RUGCHECK_URL = os.environ.get("RUGCHECK_URL", "").strip()
 GOPLUS_URL = os.environ.get("GOPLUS_URL", "").strip()
 HONEYPOT_URL = os.environ.get("HONEYPOT_URL", "").strip()
@@ -57,13 +57,14 @@ MAX_BUY_ALERTS_PER_WINDOW = 3
 
 MAX_MARKET_CAP = 5_000_000
 MIN_LIQUIDITY = 1_200
-MIN_LIQ_TO_MC_RATIO = 0.06
+MIN_LIQ_TO_MC_RATIO = 0.08
 WASH_RATIO_LIMIT = 45.0
-NO_CHASE_MULTIPLIER = 2.6
+NO_CHASE_MULTIPLIER = 2.4
 MAX_TRACKED_TOKENS = 280
 GECKO_MAX_ADD_PER_CYCLE = 80
 
-GOLD_SCORE = 8
+# Stricter signal classes
+GOLD_SCORE = 9
 GREEN_SCORE = 6
 
 TOP1_HARD_REJECT = 0.18
@@ -81,7 +82,7 @@ PAPER_STOP_ROI = -0.35
 ALPHA_MIN_TRADES = 3
 ALPHA_MIN_WIN_RATE = 0.40
 
-# New advanced detection
+# Advanced detection
 BURST_WINDOW_SECONDS = 30
 CLUSTER_WINDOW_SECONDS = 60
 
@@ -826,6 +827,28 @@ def early_pump_signal(token_state: dict) -> bool:
     return buys >= 4 and uniq >= 3 and vol >= 400
 
 
+def momentum_only_signal(pair: dict, token_state: dict) -> bool:
+    return (
+        not volume_burst_signal(token_state)
+        and not wallet_cluster_signal(token_state)
+        and not liquidity_add_signal(token_state)
+        and not early_pump_signal(token_state)
+        and not holder_explosion_signal(token_state)
+        and len(token_state.get("smart_wallet_hits", [])) == 0
+    )
+
+
+def liquidity_quality_tier(mc: float, liq: float) -> str:
+    if mc <= 0:
+        return "bad"
+    ratio = liq / mc
+    if ratio >= 0.8:
+        return "strong"
+    if ratio >= 0.4:
+        return "ok"
+    return "weak"
+
+
 def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -> int:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
@@ -836,7 +859,7 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     total = buys + sells
 
     count = 0
-    if mc > 0 and liq >= mc * 0.08:
+    if mc > 0 and liq >= mc * 0.12:
         count += 1
     if total >= 2 and buys >= sells:
         count += 1
@@ -851,11 +874,11 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     if holder_explosion_signal(token_state):
         count += 1
     if volume_burst_signal(token_state):
-        count += 1
+        count += 2
     if wallet_cluster_signal(token_state):
-        count += 1
+        count += 2
     if liquidity_add_signal(token_state):
-        count += 1
+        count += 2
     return count
 
 
@@ -877,52 +900,64 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     buy_ratio = buys / total if total > 0 else 0.5
 
     age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
+    liq_tier = liquidity_quality_tier(mc, liq)
 
     score = 0
 
-    if mc < 50_000:
+    # MC
+    if mc < 30_000:
         score += 2
-    elif mc < 200_000:
+    elif mc < 120_000:
         score += 1
 
-    if liq >= mc * 0.7:
-        score += 2
-    elif liq >= mc * 0.05:
+    # Liquidity quality stricter
+    if liq_tier == "strong":
+        score += 3
+    elif liq_tier == "ok":
         score += 1
+    else:
+        score -= 2
 
-    if v1 > 0 and v5 * 12 > v1 * 0.05 and v5 > 400:
-        score += 2
-    elif v5 > 700:
-        score += 1
-
+    # Basic flow
     if buys > sells:
         score += 1
-    if buy_ratio > 0.50:
+    if buy_ratio > 0.55:
         score += 1
-    if buys >= 2:
+    if buys >= 3:
+        score += 1
+    if age_min <= 15:
         score += 1
 
-    if age_min <= 20:
+    # Momentum now weaker
+    if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
+        score += 1
+    elif v5 > 1200:
         score += 1
 
+    # Real sniper signals much stronger
     if early_pump_signal(token_state):
         score += 2
     if holder_explosion_signal(token_state):
         score += 2
     if volume_burst_signal(token_state):
-        score += 3
+        score += 4
     if wallet_cluster_signal(token_state):
-        score += 2
-    if liquidity_add_signal(token_state):
         score += 3
+    if liquidity_add_signal(token_state):
+        score += 4
 
-    score += int(token_state.get("alpha_cluster_score", 0))
+    smart_hits = len(token_state.get("smart_wallet_hits", []))
+    if smart_hits >= 3:
+        score += 4
+    elif smart_hits >= 1:
+        score += 2
 
     if token_state.get("migration_flag"):
         score += 1
     if token_state.get("liq_lock_hint"):
         score += 1
 
+    # Penalties
     if holder_stats.get("soft_penalty"):
         score -= 2
     if sniper_trap_risk(token_state):
@@ -930,92 +965,53 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if wash_trading_risk(v24, liq):
         score -= 3
     if token_state.get("dev_sold"):
-        score -= 4
+        score -= 5
     if not token_state.get("tradeability_ok", True):
-        score -= 4
+        score -= 5
     if not token_state.get("risk_ok", True):
         score -= 5
+
+    # Heavy punishment for pure momentum without real sniper confirmation
+    if momentum_only_signal(pair, token_state):
+        score -= 3
 
     return max(0, min(10, score))
 
 
-def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: int) -> int:
-    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
-    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
-    age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
-
-    p = 0
-
-    if score >= 9:
-        p += 2
-    elif score >= 8:
-        p += 1
-
-    if age_min <= 8:
-        p += 2
-    elif age_min <= 20:
-        p += 1
-
-    if token_state.get("first_seen_mc", 0.0) > 0 and token_state.get("first_seen_mc", 0.0) < 20_000:
-        p += 2
-
-    if mc > 0 and liq >= mc:
-        p += 2
-    elif mc > 0 and liq >= mc * 0.08:
-        p += 1
-
-    if early_pump_signal(token_state):
-        p += 2
-    if holder_explosion_signal(token_state):
-        p += 2
-    if volume_burst_signal(token_state):
-        p += 3
-    if wallet_cluster_signal(token_state):
-        p += 2
-    if liquidity_add_signal(token_state):
-        p += 3
-
-    smart_hits = len(token_state.get("smart_wallet_hits", []))
-    if smart_hits >= 4:
-        p += 3
-    elif smart_hits >= 2:
-        p += 2
-    elif smart_hits >= 1:
-        p += 1
-
-    if token_state.get("migration_flag"):
-        p += 1
-    if token_state.get("liq_lock_hint"):
-        p += 1
-    if holder_stats.get("enabled"):
-        p += 1
-    if token_state.get("dev_sold"):
-        p -= 3
-    if not token_state.get("tradeability_ok", True):
-        p -= 3
-    if not token_state.get("risk_ok", True):
-        p -= 4
-
-    return p
-
-
 def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
     mint = token_state["mint"]
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    liq_tier = liquidity_quality_tier(mc, liq)
+
+    strong_sniper_signal = any([
+        volume_burst_signal(token_state),
+        wallet_cluster_signal(token_state),
+        liquidity_add_signal(token_state),
+        len(token_state.get("smart_wallet_hits", [])) >= 1,
+    ])
 
     if hard_red or color == "🔴 RED":
         if mint in HELD_TOKENS:
             return "RED"
         return "IGNORE"
 
+    # GOLD is now strict
     if color == "🟡 GOLD":
-        if live_confirmation_count(pair, token_state, holder_stats) < 2:
+        if live_confirmation_count(pair, token_state, holder_stats) < 4:
             return "IGNORE"
+        if liq_tier != "strong":
+            return "GREEN" if can_send_buy_alert() else "IGNORE"
+        if not strong_sniper_signal:
+            return "GREEN" if can_send_buy_alert() else "IGNORE"
         if not can_send_buy_alert():
             return "IGNORE"
         return "GOLD"
 
     if color == "🟢 GREEN":
         if live_confirmation_count(pair, token_state, holder_stats) < 2:
+            return "IGNORE"
+        if liq_tier == "weak":
             return "IGNORE"
         if not can_send_buy_alert():
             return "IGNORE"
@@ -1172,12 +1168,12 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
         reasons.append("wallet cluster")
     if liquidity_add_signal(token_state):
         reasons.append("liquidity add")
+    if len(token_state.get("smart_wallet_hits", [])) >= 1:
+        reasons.append("smart wallet")
     if early_pump_signal(token_state):
         reasons.append("early buys")
     if holder_explosion_signal(token_state):
         reasons.append("buyers rising")
-    if len(token_state.get("smart_wallet_hits", [])) >= 1:
-        reasons.append("smart wallet")
 
     if not reasons:
         reasons.append("momentum")
