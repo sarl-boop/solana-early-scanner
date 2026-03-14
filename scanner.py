@@ -24,6 +24,7 @@ HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
 
+# optional external safety endpoints
 RUGCHECK_URL = os.environ.get("RUGCHECK_URL", "").strip()
 GOPLUS_URL = os.environ.get("GOPLUS_URL", "").strip()
 HONEYPOT_URL = os.environ.get("HONEYPOT_URL", "").strip()
@@ -54,26 +55,31 @@ ALERT_COOLDOWN_SECONDS = 8 * 3600
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 3
 
-# Micro-cap priority
+# universe / micro-cap priority
 MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 1_500
-MIN_LIQ_TO_MC_RATIO = 0.08
+MIN_LIQ_TO_MC_RATIO = 0.10
 WASH_RATIO_LIMIT = 45.0
 NO_CHASE_MULTIPLIER = 2.8
-MAX_TRACKED_TOKENS = 320
+MAX_TRACKED_TOKENS = 350
 GECKO_MAX_ADD_PER_CYCLE = 100
 
-# Gold-only profile
+# gold-only
 GOLD_SCORE = 8
 MIN_GOLD_MC = 8_000
 MAX_GOLD_MC = 300_000
 
-TOP1_HARD_REJECT = 0.18
-TOP3_HARD_REJECT = 0.40
-TOP1_SOFT_PENALTY = 0.10
-TOP3_SOFT_PENALTY = 0.25
+# holder distribution
+TOP1_HARD_REJECT = 0.50
+TOP3_HARD_REJECT = 0.80
+TOP1_SOFT_PENALTY = 0.25
+TOP3_SOFT_PENALTY = 0.55
 
-LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
+# long-term conviction
+MIN_CONVICTION_MC = 30_000
+MAX_CONVICTION_MC = 300_000
+
+LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead", "renounced"]
 
 PAPER_GOLD_SIZE_EUR = 50
 PAPER_WINNER_ROI = 2.0
@@ -358,6 +364,8 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "dev_sold": False,
         "tradeability_ok": True,
         "risk_ok": True,
+        "lp_safe": False,
+        "lp_risk": False,
         "liq_lock_hint": False,
         "migration_flag": source == "migration",
         "early_buys": 0,
@@ -450,9 +458,9 @@ def get_holder_stats(mint: str) -> dict:
             "soft_penalty": False,
         }
 
-    amounts = [to_float(x.get("uiAmount"), 0.0) for x in largest[:3]]
+    amounts = [to_float(x.get("uiAmount"), 0.0) for x in largest[:10]]
     top1_pct = amounts[0] / supply if amounts else 0.0
-    top3_pct = sum(amounts) / supply if supply > 0 else 0.0
+    top3_pct = sum(amounts[:3]) / supply if supply > 0 else 0.0
 
     hard_reject = top1_pct > TOP1_HARD_REJECT or top3_pct > TOP3_HARD_REJECT
     soft_penalty = top1_pct > TOP1_SOFT_PENALTY or top3_pct > TOP3_SOFT_PENALTY
@@ -480,8 +488,14 @@ def fetch_optional_json(url: str, mint: str) -> Optional[dict]:
         return None
 
 
-def optional_risk_check(mint: str) -> Tuple[bool, List[str]]:
+def optional_risk_check(mint: str) -> Tuple[bool, Dict[str, bool], List[str]]:
     notes: List[str] = []
+    signals = {
+        "lp_safe": False,
+        "lp_risk": False,
+        "owner_risk": False,
+        "mint_risk": False,
+    }
 
     rc = fetch_optional_json(RUGCHECK_URL, mint)
     gp = fetch_optional_json(GOPLUS_URL, mint)
@@ -491,10 +505,24 @@ def optional_risk_check(mint: str) -> Tuple[bool, List[str]]:
         if not data:
             continue
         txt = json.dumps(data).lower()
-        if any(x in txt for x in ["honeypot", "cannot sell", "blacklist", "malicious", "rug", "scam"]):
-            notes.append(f"{label} risk flag")
 
-    return (len(notes) == 0), notes
+        if any(x in txt for x in ["honeypot", "cannot sell", "blacklist", "malicious", "rug", "scam"]):
+            notes.append(f"{label} risk")
+            signals["owner_risk"] = True
+
+        if any(x in txt for x in ["lp locked", "liquidity locked", "locked liquidity", "burned lp"]):
+            signals["lp_safe"] = True
+
+        if any(x in txt for x in ["lp unlocked", "unlocked liquidity", "liquidity not locked"]):
+            signals["lp_risk"] = True
+            notes.append(f"{label} lp risk")
+
+        if any(x in txt for x in ["mintable", "can mint", "owner can mint"]):
+            signals["mint_risk"] = True
+            notes.append(f"{label} mint risk")
+
+    risk_ok = not (signals["owner_risk"] or signals["lp_risk"] or signals["mint_risk"])
+    return risk_ok, signals, notes
 
 # =========================================================
 # DEX / GECKO
@@ -703,26 +731,6 @@ def pre_migration_x50_signal(token_state: dict) -> bool:
         )
     )
 
-
-def cult_meme_proxy_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
-    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
-    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
-    uniq_buyers = len(token_state.get("early_unique_buyers", []))
-    age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
-
-    if mc <= 0 or liq <= 0:
-        return False
-
-    ratio = liq / mc
-    return (
-        0.35 <= ratio
-        and uniq_buyers >= 6
-        and age_min <= 30
-        and not token_state.get("dev_sold", False)
-        and not holder_stats.get("hard_reject", False)
-        and not sniper_trap_risk(token_state)
-    )
-
 # =========================================================
 # TRACKING
 # =========================================================
@@ -823,6 +831,23 @@ def sniper_trap_risk(token_state: dict) -> bool:
     return False
 
 
+def dev_supply_proxy_risk(token_state: dict) -> bool:
+    counts = token_state.get("buy_wallet_counts", {})
+    dev_wallet = token_state.get("candidate_dev_wallet")
+    if not dev_wallet or dev_wallet not in counts:
+        return False
+
+    dev_buys = counts.get(dev_wallet, 0)
+    total_buys = max(1, sum(counts.values()))
+    share = dev_buys / total_buys
+
+    if dev_buys >= 4:
+        return True
+    if total_buys >= 5 and share >= 0.5:
+        return True
+    return False
+
+
 def fake_liquidity_risk(mc: float, liq: float) -> bool:
     if mc <= 0:
         return True
@@ -868,6 +893,48 @@ def early_pump_signal(token_state: dict) -> bool:
     uniq = len(token_state.get("early_unique_buyers", []))
     vol = to_float(token_state.get("early_volume_est", 0.0), 0.0)
     return buys >= 4 and uniq >= 3 and vol >= 400
+
+
+def cult_meme_proxy_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    uniq_buyers = len(token_state.get("early_unique_buyers", []))
+    age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
+
+    if mc <= 0 or liq <= 0:
+        return False
+
+    ratio = liq / mc
+    return (
+        MIN_CONVICTION_MC <= mc <= MAX_CONVICTION_MC
+        and ratio >= 0.35
+        and uniq_buyers >= 6
+        and age_min <= 30
+        and not token_state.get("dev_sold", False)
+        and not holder_stats.get("hard_reject", False)
+        and not sniper_trap_risk(token_state)
+        and not dev_supply_proxy_risk(token_state)
+    )
+
+
+def long_term_conviction_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    if mc <= 0 or liq <= 0:
+        return False
+
+    ratio = liq / mc
+    uniq_buyers = len(token_state.get("early_unique_buyers", []))
+
+    return (
+        MIN_CONVICTION_MC <= mc <= MAX_CONVICTION_MC
+        and ratio >= 0.45
+        and uniq_buyers >= 5
+        and not holder_stats.get("hard_reject", False)
+        and not token_state.get("lp_risk", False)
+        and not dev_supply_proxy_risk(token_state)
+        and not token_state.get("dev_sold", False)
+    )
 
 
 def momentum_only_signal(token_state: dict) -> bool:
@@ -950,6 +1017,8 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 2
     if pre_migration_x50_signal(token_state):
         count += 2
+    if long_term_conviction_signal(token_state, pair, holder_stats):
+        count += 2
     return count
 
 
@@ -1000,13 +1069,11 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if age_min <= 20:
         score += 1
 
-    # momentum faible
     if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
         score += 1
     elif v5 > 1200:
         score += 1
 
-    # vrais signaux
     if early_pump_signal(token_state):
         score += 2
     if holder_explosion_signal(token_state):
@@ -1028,22 +1095,28 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     elif smart_hits >= 1:
         score += 2
 
-    # cult meme proxy
     if cult_meme_proxy_signal(token_state, pair, holder_stats):
+        score += 3
+    if long_term_conviction_signal(token_state, pair, holder_stats):
         score += 3
 
     if token_state.get("migration_flag", False):
         score += 2
-    if token_state.get("liq_lock_hint", False):
+    if token_state.get("lp_safe", False):
         score += 1
 
+    # penalties
     if holder_stats.get("soft_penalty", False):
-        score -= 2
+        score -= 3
     if sniper_trap_risk(token_state):
         score -= 4
+    if dev_supply_proxy_risk(token_state):
+        score -= 5
     if wash_trading_risk(v24, liq):
         score -= 3
     if token_state.get("dev_sold", False):
+        score -= 6
+    if token_state.get("lp_risk", False):
         score -= 6
     if not token_state.get("tradeability_ok", True):
         score -= 6
@@ -1061,7 +1134,6 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     liq_tier = liquidity_quality_tier(mc, liq)
 
-    # RED only for held tokens
     if hard_red:
         if token_state["mint"] in HELD_TOKENS:
             return "RED"
@@ -1077,7 +1149,7 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
         return "IGNORE"
 
     sniper_ok = has_real_sniper_signal(token_state)
-    conviction_ok = cult_meme_proxy_signal(token_state, pair, holder_stats)
+    conviction_ok = long_term_conviction_signal(token_state, pair, holder_stats)
 
     if (sniper_ok or conviction_ok) and live_confirmation_count(pair, token_state, holder_stats) >= 4 and score >= GOLD_SCORE:
         return "GOLD"
@@ -1221,7 +1293,7 @@ async def paper_positions_loop():
 # ALERT BUILD
 # =========================================================
 
-def build_alert(pair: dict, token_state: dict, score: int, alert_type: str) -> str:
+def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, alert_type: str) -> str:
     mint = token_state["mint"]
     name = token_state.get("name") or (pair.get("baseToken") or {}).get("name") or mint[:6]
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
@@ -1240,12 +1312,14 @@ def build_alert(pair: dict, token_state: dict, score: int, alert_type: str) -> s
     if dev_accumulation_signal(token_state):
         reasons.append("dev accumulation")
     if pre_migration_x50_signal(token_state):
-        reasons.append("pre-migration")
-    if token_state.get("migration_flag", False):
-        reasons.append("migration")
+        reasons.append("pre-migration x50")
+    if long_term_conviction_signal(token_state, pair, holder_stats):
+        reasons.append("long-term conviction")
+    if cult_meme_proxy_signal(token_state, pair, holder_stats):
+        reasons.append("cult meme proxy")
 
     if not reasons:
-        reasons.append("cult meme proxy")
+        reasons.append("risk change")
 
     if alert_type == "RED":
         color = "🔴 RED"
@@ -1291,7 +1365,6 @@ def evaluate_token(mint: str) -> None:
     token_state["last_pair_url"] = pair.get("url") or ""
     token_state["last_seen_ts"] = now_ts()
     token_state["liq_lock_hint"] = liquidity_lock_hint(pair)
-    token_state["tradeability_ok"] = anti_honeypot_guard(pair)
 
     current_liq = liq
     last_liq = to_float(token_state.get("last_liquidity_usd", 0.0), 0.0)
@@ -1307,8 +1380,12 @@ def evaluate_token(mint: str) -> None:
 
     prune_old_events(token_state)
 
-    risk_ok, _risk_notes = optional_risk_check(mint)
+    risk_ok, risk_signals, _risk_notes = optional_risk_check(mint)
     token_state["risk_ok"] = risk_ok
+    token_state["lp_safe"] = bool(risk_signals.get("lp_safe")) or token_state.get("liq_lock_hint", False)
+    token_state["lp_risk"] = bool(risk_signals.get("lp_risk", False))
+
+    token_state["tradeability_ok"] = anti_honeypot_guard(pair)
 
     if token_state["first_seen_mc"] <= 0 and mc > 0:
         token_state["first_seen_mc"] = mc
@@ -1341,7 +1418,11 @@ def evaluate_token(mint: str) -> None:
         hard_red = True
     if sniper_trap_risk(token_state):
         hard_red = True
+    if dev_supply_proxy_risk(token_state):
+        hard_red = True
     if token_state.get("dev_sold", False):
+        hard_red = True
+    if token_state.get("lp_risk", False):
         hard_red = True
     if not token_state.get("tradeability_ok", True):
         hard_red = True
@@ -1358,7 +1439,7 @@ def evaluate_token(mint: str) -> None:
     if recently_alerted(alert_key):
         return
 
-    msg = build_alert(pair, token_state, score, alert_type)
+    msg = build_alert(pair, token_state, holder_stats, score, alert_type)
     send_discord(msg)
     mark_alerted(alert_key)
 
@@ -1449,7 +1530,7 @@ async def websocket_loop():
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
-                    # Pump.fun launch sniper
+                    # pump.fun launch sniper
                     if mint and ("name" in payload and "symbol" in payload):
                         rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         rec["launch_seen_ts"] = now_ts()
@@ -1567,7 +1648,7 @@ async def heartbeat_loop():
                 )
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — seen {seen} — evaluated {evaluated} — paper open {paper_open} — gold/red mode"
+                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — seen {seen} — evaluated {evaluated} — paper open {paper_open} — gold/red improved mode"
                 )
 
                 STATE["last_heartbeat"] = now
