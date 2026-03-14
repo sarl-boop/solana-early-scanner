@@ -5,5 +5,7 @@
   "buy_alert_history": [],
   "paper_positions": {},
   "wallet_stats": {},
-  "alpha_discovered_wallets": []
+  "alpha_discovered_wallets": [],
+  "cycle_seen_tokens": 0,
+  "cycle_evaluated_tokens": 0
 }
