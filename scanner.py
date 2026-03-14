@@ -54,23 +54,19 @@ ALERT_COOLDOWN_SECONDS = 8 * 3600
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 3
 
-# Mix mode
-SNIPER_MIN_MC = 8_000
-SNIPER_MAX_MC = 80_000
-
-CONVICTION_MIN_MC = 40_000
-CONVICTION_MAX_MC = 300_000
-
-MAX_MARKET_CAP = 5_000_000
+# Micro-cap priority
+MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 1_500
 MIN_LIQ_TO_MC_RATIO = 0.08
 WASH_RATIO_LIMIT = 45.0
 NO_CHASE_MULTIPLIER = 2.8
 MAX_TRACKED_TOKENS = 320
-GECKO_MAX_ADD_PER_CYCLE = 90
+GECKO_MAX_ADD_PER_CYCLE = 100
 
-GOLD_SCORE_SNIPER = 8
-GOLD_SCORE_CONVICTION = 8
+# Gold-only profile
+GOLD_SCORE = 8
+MIN_GOLD_MC = 8_000
+MAX_GOLD_MC = 300_000
 
 TOP1_HARD_REJECT = 0.18
 TOP3_HARD_REJECT = 0.40
@@ -79,8 +75,7 @@ TOP3_SOFT_PENALTY = 0.25
 
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
 
-PAPER_GOLD_SNIPER_SIZE_EUR = 50
-PAPER_GOLD_CONVICTION_SIZE_EUR = 50
+PAPER_GOLD_SIZE_EUR = 50
 PAPER_WINNER_ROI = 2.0
 PAPER_STOP_ROI = -0.35
 
@@ -696,7 +691,7 @@ def dev_accumulation_signal(token_state: dict) -> bool:
     return any(c >= DEV_ACCUM_MIN_BUYS for c in counts.values())
 
 
-def pre_migration_sniper_signal(token_state: dict) -> bool:
+def pre_migration_x50_signal(token_state: dict) -> bool:
     age = now_ts() - int(token_state.get("launch_seen_ts", token_state.get("first_seen_ts", now_ts())))
     return (
         age <= PREMIGRATION_WINDOW_SECONDS
@@ -706,6 +701,26 @@ def pre_migration_sniper_signal(token_state: dict) -> bool:
             or wallet_cluster_signal(token_state)
             or dev_accumulation_signal(token_state)
         )
+    )
+
+
+def cult_meme_proxy_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    uniq_buyers = len(token_state.get("early_unique_buyers", []))
+    age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
+
+    if mc <= 0 or liq <= 0:
+        return False
+
+    ratio = liq / mc
+    return (
+        0.35 <= ratio
+        and uniq_buyers >= 6
+        and age_min <= 30
+        and not token_state.get("dev_sold", False)
+        and not holder_stats.get("hard_reject", False)
+        and not sniper_trap_risk(token_state)
     )
 
 # =========================================================
@@ -864,13 +879,14 @@ def momentum_only_signal(token_state: dict) -> bool:
         and not holder_explosion_signal(token_state)
         and len(token_state.get("smart_wallet_hits", [])) == 0
         and not dev_accumulation_signal(token_state)
-        and not pre_migration_sniper_signal(token_state)
+        and not pre_migration_x50_signal(token_state)
         and not token_state.get("migration_flag", False)
     )
 
 
 def has_real_sniper_signal(token_state: dict) -> bool:
     signals = 0
+
     if volume_burst_signal(token_state):
         signals += 1
     if wallet_cluster_signal(token_state):
@@ -881,10 +897,11 @@ def has_real_sniper_signal(token_state: dict) -> bool:
         signals += 1
     if dev_accumulation_signal(token_state):
         signals += 1
-    if pre_migration_sniper_signal(token_state):
+    if pre_migration_x50_signal(token_state):
         signals += 1
     if token_state.get("migration_flag", False):
         signals += 1
+
     return signals >= 2
 
 
@@ -915,7 +932,7 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 1
     if len(token_state.get("smart_wallet_hits", [])) >= 1:
         count += 1
-    if token_state.get("migration_flag"):
+    if token_state.get("migration_flag", False):
         count += 1
     if holder_stats.get("enabled"):
         count += 1
@@ -931,7 +948,7 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 2
     if dev_accumulation_signal(token_state):
         count += 2
-    if pre_migration_sniper_signal(token_state):
+    if pre_migration_x50_signal(token_state):
         count += 2
     return count
 
@@ -958,14 +975,13 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     score = 0
 
-    # Mode A
-    if SNIPER_MIN_MC <= mc < 20_000:
+    if 8_000 <= mc < 20_000:
         score += 3
     elif 20_000 <= mc < 40_000:
         score += 2
-    elif 40_000 <= mc <= 80_000:
+    elif 40_000 <= mc <= 120_000:
         score += 1
-    elif 80_000 < mc <= CONVICTION_MAX_MC:
+    elif 120_000 < mc <= 300_000:
         score += 1
 
     if liq_tier == "strong":
@@ -984,11 +1000,13 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if age_min <= 20:
         score += 1
 
+    # momentum faible
     if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
         score += 1
     elif v5 > 1200:
         score += 1
 
+    # vrais signaux
     if early_pump_signal(token_state):
         score += 2
     if holder_explosion_signal(token_state):
@@ -1001,7 +1019,7 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
         score += 4
     if dev_accumulation_signal(token_state):
         score += 3
-    if pre_migration_sniper_signal(token_state):
+    if pre_migration_x50_signal(token_state):
         score += 4
 
     smart_hits = len(token_state.get("smart_wallet_hits", []))
@@ -1010,22 +1028,22 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     elif smart_hits >= 1:
         score += 2
 
-    if token_state.get("migration_flag"):
+    # cult meme proxy
+    if cult_meme_proxy_signal(token_state, pair, holder_stats):
+        score += 3
+
+    if token_state.get("migration_flag", False):
         score += 2
-    if token_state.get("liq_lock_hint"):
+    if token_state.get("liq_lock_hint", False):
         score += 1
 
-    # conviction bonus
-    if CONVICTION_MIN_MC <= mc <= CONVICTION_MAX_MC and liq_tier == "strong":
-        score += 1
-
-    if holder_stats.get("soft_penalty"):
+    if holder_stats.get("soft_penalty", False):
         score -= 2
     if sniper_trap_risk(token_state):
         score -= 4
     if wash_trading_risk(v24, liq):
         score -= 3
-    if token_state.get("dev_sold"):
+    if token_state.get("dev_sold", False):
         score -= 6
     if not token_state.get("tradeability_ok", True):
         score -= 6
@@ -1038,13 +1056,16 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     return max(0, min(10, score))
 
 
-def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
-    if hard_red:
-        return "IGNORE"
-
+def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     liq_tier = liquidity_quality_tier(mc, liq)
+
+    # RED only for held tokens
+    if hard_red:
+        if token_state["mint"] in HELD_TOKENS:
+            return "RED"
+        return "IGNORE"
 
     if liq_tier == "weak":
         return "IGNORE"
@@ -1052,26 +1073,14 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
     if not can_send_buy_alert():
         return "IGNORE"
 
-    # GOLD-SNIPER
-    if SNIPER_MIN_MC <= mc <= SNIPER_MAX_MC:
-        if has_real_sniper_signal(token_state) and live_confirmation_count(pair, token_state, holder_stats) >= 4 and score >= GOLD_SCORE_SNIPER:
-            return "GOLD-SNIPER"
+    if not (MIN_GOLD_MC <= mc <= MAX_GOLD_MC):
+        return "IGNORE"
 
-    # GOLD-CONVICTION
-    if CONVICTION_MIN_MC <= mc <= CONVICTION_MAX_MC:
-        conviction_ok = (
-            liq_tier == "strong"
-            and live_confirmation_count(pair, token_state, holder_stats) >= 4
-            and score >= GOLD_SCORE_CONVICTION
-            and (
-                len(token_state.get("smart_wallet_hits", [])) >= 1
-                or liquidity_add_signal(token_state)
-                or token_state.get("migration_flag", False)
-                or holder_explosion_signal(token_state)
-            )
-        )
-        if conviction_ok:
-            return "GOLD-CONVICTION"
+    sniper_ok = has_real_sniper_signal(token_state)
+    conviction_ok = cult_meme_proxy_signal(token_state, pair, holder_stats)
+
+    if (sniper_ok or conviction_ok) and live_confirmation_count(pair, token_state, holder_stats) >= 4 and score >= GOLD_SCORE:
+        return "GOLD"
 
     return "IGNORE"
 
@@ -1080,10 +1089,12 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
 # =========================================================
 
 def open_paper_position(mint: str, token_state: dict, pair: dict, alert_type: str) -> None:
+    if alert_type != "GOLD":
+        return
     if mint in STATE.get("paper_positions", {}):
         return
 
-    size = PAPER_GOLD_SNIPER_SIZE_EUR if alert_type == "GOLD-SNIPER" else PAPER_GOLD_CONVICTION_SIZE_EUR
+    size = PAPER_GOLD_SIZE_EUR
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     name = token_state.get("name") or mint[:6]
     source = token_state.get("source", "unknown")
@@ -1210,7 +1221,7 @@ async def paper_positions_loop():
 # ALERT BUILD
 # =========================================================
 
-def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, alert_type: str) -> str:
+def build_alert(pair: dict, token_state: dict, score: int, alert_type: str) -> str:
     mint = token_state["mint"]
     name = token_state.get("name") or (pair.get("baseToken") or {}).get("name") or mint[:6]
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
@@ -1228,22 +1239,25 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
         reasons.append("alpha wallet")
     if dev_accumulation_signal(token_state):
         reasons.append("dev accumulation")
-    if pre_migration_sniper_signal(token_state):
+    if pre_migration_x50_signal(token_state):
         reasons.append("pre-migration")
     if token_state.get("migration_flag", False):
         reasons.append("migration")
-    if holder_explosion_signal(token_state):
-        reasons.append("buyers rising")
 
     if not reasons:
-        reasons.append("momentum")
+        reasons.append("cult meme proxy")
 
-    action = "Buy 50€"
+    if alert_type == "RED":
+        color = "🔴 RED"
+        action = "Sell"
+    else:
+        color = "🟡 GOLD"
+        action = "Buy 50€"
 
     return (
         f"{name}\n"
         f"Score: {score}/10\n"
-        f"Color: 🟡 {alert_type}\n"
+        f"Color: {color}\n"
         f"Market cap: ${compact_k(mc)}\n"
         f"Liquidity: ${compact_k(liq)}\n"
         f"Reason: {', '.join(reasons[:3])}\n"
@@ -1302,7 +1316,7 @@ def evaluate_token(mint: str) -> None:
 
     STATE["cycle_evaluated_tokens"] = int(STATE.get("cycle_evaluated_tokens", 0)) + 1
 
-    if mc <= 0 or mc > MAX_MARKET_CAP:
+    if mc <= 0 or mc > MAX_DISCOVERY_MC:
         return
     if liq < MIN_LIQUIDITY:
         return
@@ -1327,7 +1341,7 @@ def evaluate_token(mint: str) -> None:
         hard_red = True
     if sniper_trap_risk(token_state):
         hard_red = True
-    if token_state.get("dev_sold"):
+    if token_state.get("dev_sold", False):
         hard_red = True
     if not token_state.get("tradeability_ok", True):
         hard_red = True
@@ -1336,7 +1350,7 @@ def evaluate_token(mint: str) -> None:
 
     score = compute_score(pair, token_state, holder_stats)
 
-    alert_type = classify_alert_type("🟡 GOLD", pair, token_state, holder_stats, score, hard_red)
+    alert_type = classify_alert_type(pair, token_state, holder_stats, score, hard_red)
     if alert_type == "IGNORE":
         return
 
@@ -1344,7 +1358,7 @@ def evaluate_token(mint: str) -> None:
     if recently_alerted(alert_key):
         return
 
-    msg = build_alert(pair, token_state, holder_stats, score, alert_type)
+    msg = build_alert(pair, token_state, score, alert_type)
     send_discord(msg)
     mark_alerted(alert_key)
 
@@ -1375,8 +1389,9 @@ def evaluate_token(mint: str) -> None:
         dex_url=dex_url,
     )
 
-    mark_buy_alert_sent()
-    open_paper_position(mint, token_state, pair, alert_type)
+    if alert_type == "GOLD":
+        mark_buy_alert_sent()
+        open_paper_position(mint, token_state, pair, alert_type)
 
 # =========================================================
 # WS HELPERS
@@ -1434,6 +1449,7 @@ async def websocket_loop():
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
+                    # Pump.fun launch sniper
                     if mint and ("name" in payload and "symbol" in payload):
                         rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         rec["launch_seen_ts"] = now_ts()
@@ -1491,7 +1507,7 @@ async def gecko_new_pools_loop():
                 mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
                 liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
 
-                if mc <= 0 or mc > MAX_MARKET_CAP:
+                if mc <= 0 or mc > MAX_DISCOVERY_MC:
                     continue
                 if liq < MIN_LIQUIDITY:
                     continue
@@ -1551,7 +1567,7 @@ async def heartbeat_loop():
                 )
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — seen {seen} — evaluated {evaluated} — paper open {paper_open} — mix mode"
+                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — seen {seen} — evaluated {evaluated} — paper open {paper_open} — gold/red mode"
                 )
 
                 STATE["last_heartbeat"] = now
