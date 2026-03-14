@@ -52,12 +52,12 @@ BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 2
 
 MAX_MARKET_CAP = 5_000_000
-MIN_LIQUIDITY = 5_000
-MIN_LIQ_TO_MC_RATIO = 0.25
+MIN_LIQUIDITY = 3_000
+MIN_LIQ_TO_MC_RATIO = 0.15
 WASH_RATIO_LIMIT = 35.0
 NO_CHASE_MULTIPLIER = 2.0
-MAX_TRACKED_TOKENS = 150
-GECKO_MAX_ADD_PER_CYCLE = 35
+MAX_TRACKED_TOKENS = 180
+GECKO_MAX_ADD_PER_CYCLE = 45
 
 GOLD_SCORE = 8
 
@@ -701,9 +701,9 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     total = buys + sells
 
     count = 0
-    if mc > 0 and liq >= mc * 0.5:
+    if mc > 0 and liq >= mc * 0.4:
         count += 1
-    if total >= 6 and buys >= sells:
+    if total >= 5 and buys >= sells:
         count += 1
     if len(token_state.get("smart_wallet_hits", [])) >= 1:
         count += 1
@@ -746,22 +746,22 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     if liq >= mc * 0.7:
         score += 2
-    elif liq >= mc * 0.35:
+    elif liq >= mc * 0.25:
         score += 1
 
-    if v1 > 0 and v5 * 12 > v1 * 0.20 and v5 > 2500:
+    if v1 > 0 and v5 * 12 > v1 * 0.15 and v5 > 1500:
         score += 2
-    elif v5 > 4500:
+    elif v5 > 3000:
         score += 1
 
     if buys > sells:
         score += 1
-    if buy_ratio > 0.58:
+    if buy_ratio > 0.55:
         score += 1
-    if buys >= 5:
+    if buys >= 4:
         score += 1
 
-    if age_min <= 8:
+    if age_min <= 10:
         score += 1
 
     if early_pump_signal(token_state):
@@ -806,7 +806,7 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
 
     if age_min <= 5:
         p += 2
-    elif age_min <= 8:
+    elif age_min <= 10:
         p += 1
 
     if token_state.get("first_seen_mc", 0.0) > 0 and token_state.get("first_seen_mc", 0.0) < 20_000:
@@ -814,7 +814,7 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
 
     if mc > 0 and liq >= mc:
         p += 2
-    elif mc > 0 and liq >= mc * 0.5:
+    elif mc > 0 and liq >= mc * 0.35:
         p += 1
 
     if early_pump_signal(token_state):
@@ -1078,17 +1078,17 @@ def evaluate_token(mint: str) -> None:
         return
     if age_min < 1:
         return
-    if vol24 > 0 and v5 > vol24 * 0.5:
+    if vol24 > 0 and v5 > vol24 * 0.6:
         return
-    if v1 > 0 and v5 > v1 * 0.8:
+    if v1 > 0 and v5 > v1 * 1.0:
         return
 
-    if token_state.get("source") == "gecko_new_pool" and age_min > 15:
+    if token_state.get("source") == "gecko_new_pool" and age_min > 20:
         return
 
     holder_stats = get_holder_stats(mint)
 
-    if not holder_stats.get("enabled") and mc > 80_000:
+    if not holder_stats.get("enabled") and mc > 120_000:
         return
 
     hard_red = False
