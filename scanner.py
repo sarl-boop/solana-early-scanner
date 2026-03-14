@@ -4,7 +4,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 import requests
 import websockets
@@ -20,10 +20,14 @@ PUMPPORTAL_API_KEY = os.environ.get("PUMPPORTAL_API_KEY", "").strip()
 SMART_WALLETS = {
     x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
-
 HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
+
+# Optional risk adapters (left generic on purpose)
+RUGCHECK_URL = os.environ.get("RUGCHECK_URL", "").strip()
+GOPLUS_URL = os.environ.get("GOPLUS_URL", "").strip()
+HONEYPOT_URL = os.environ.get("HONEYPOT_URL", "").strip()
 
 PUMPPORTAL_WS_BASE = "wss://pumpportal.fun/api/data"
 PUMPPORTAL_WS = (
@@ -41,37 +45,39 @@ PAPER_LOG_FILE = Path("paper_trades_log.csv")
 
 HEARTBEAT_INTERVAL_SECONDS = 3600
 SAVE_INTERVAL_SECONDS = 30
-EVALUATE_INTERVAL_SECONDS = 12
-GECKO_REFRESH_SECONDS = 25
+EVALUATE_INTERVAL_SECONDS = 10
+GECKO_REFRESH_SECONDS = 20
 PAPER_CHECK_INTERVAL_SECONDS = 300
 
-TOKEN_TTL_SECONDS = 2 * 3600
-ALERT_COOLDOWN_SECONDS = 12 * 3600
+TOKEN_TTL_SECONDS = 3 * 3600
+ALERT_COOLDOWN_SECONDS = 8 * 3600
 
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
-MAX_BUY_ALERTS_PER_WINDOW = 2
+MAX_BUY_ALERTS_PER_WINDOW = 3
 
 MAX_MARKET_CAP = 5_000_000
-MIN_LIQUIDITY = 1_500
-MIN_LIQ_TO_MC_RATIO = 0.08
-WASH_RATIO_LIMIT = 35.0
-NO_CHASE_MULTIPLIER = 2.0
-MAX_TRACKED_TOKENS = 260
-GECKO_MAX_ADD_PER_CYCLE = 70
+MIN_LIQUIDITY = 1_200
+MIN_LIQ_TO_MC_RATIO = 0.06
+WASH_RATIO_LIMIT = 45.0
+NO_CHASE_MULTIPLIER = 2.6
+MAX_TRACKED_TOKENS = 280
+GECKO_MAX_ADD_PER_CYCLE = 80
 
 GOLD_SCORE = 8
+GREEN_SCORE = 6
 
-TOP1_HARD_REJECT = 0.15
-TOP3_HARD_REJECT = 0.35
-TOP1_SOFT_PENALTY = 0.08
-TOP3_SOFT_PENALTY = 0.22
+TOP1_HARD_REJECT = 0.18
+TOP3_HARD_REJECT = 0.40
+TOP1_SOFT_PENALTY = 0.10
+TOP3_SOFT_PENALTY = 0.25
 
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
 
-PAPER_GOLD_A_SIZE_EUR = 50
-PAPER_GOLD_B_SIZE_EUR = 25
+PAPER_GOLD_SIZE_EUR = 50
+PAPER_GREEN_SIZE_EUR = 25
 PAPER_WINNER_ROI = 2.0
 PAPER_STOP_ROI = -0.35
+
 ALPHA_MIN_TRADES = 3
 ALPHA_MIN_WIN_RATE = 0.40
 
@@ -218,7 +224,8 @@ def ensure_alert_log_file() -> None:
             "timestamp", "alert_type", "mint", "name", "source", "score",
             "market_cap", "liquidity", "first_seen_mc", "max_seen_mc", "age_min",
             "top1_pct", "top3_pct", "migration_flag", "smart_wallet_count",
-            "early_buys", "early_unique_buyers", "dev_sold", "tradeability_ok", "dex_url"
+            "early_buys", "early_unique_buyers", "dev_sold", "tradeability_ok",
+            "risk_ok", "dex_url"
         ])
 
 
@@ -252,6 +259,7 @@ def log_alert_csv(
     early_unique_buyers: int,
     dev_sold: bool,
     tradeability_ok: bool,
+    risk_ok: bool,
     dex_url: str,
 ) -> None:
     try:
@@ -264,7 +272,7 @@ def log_alert_csv(
                 round(first_seen_mc, 2), round(max_seen_mc, 2), round(age_min, 2),
                 round(top1_pct, 4), round(top3_pct, 4), migration_flag,
                 smart_wallet_count, early_buys, early_unique_buyers, dev_sold,
-                tradeability_ok, dex_url
+                tradeability_ok, risk_ok, dex_url
             ])
     except Exception as e:
         print("alert log write error:", e)
@@ -330,6 +338,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "candidate_dev_wallet": None,
         "dev_sold": False,
         "tradeability_ok": True,
+        "risk_ok": True,
         "liq_lock_hint": False,
         "migration_flag": source == "migration",
         "early_buys": 0,
@@ -435,6 +444,42 @@ def get_holder_stats(mint: str) -> dict:
     }
 
 # =========================================================
+# OPTIONAL RISK ADAPTERS
+# =========================================================
+
+def fetch_optional_json(url: str, mint: str) -> Optional[dict]:
+    if not url:
+        return None
+    try:
+        r = requests.get(url.format(mint=mint), timeout=8)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def optional_risk_check(mint: str) -> Tuple[bool, List[str]]:
+    """
+    Generic adapters only.
+    If you later add real URLs with stable schemas, this can become stricter.
+    """
+    notes: List[str] = []
+
+    rc = fetch_optional_json(RUGCHECK_URL, mint)
+    gp = fetch_optional_json(GOPLUS_URL, mint)
+    hp = fetch_optional_json(HONEYPOT_URL, mint)
+
+    # Conservative parsing only if obvious danger words appear.
+    for label, data in [("rugcheck", rc), ("goplus", gp), ("honeypot", hp)]:
+        if not data:
+            continue
+        txt = json.dumps(data).lower()
+        if any(x in txt for x in ["honeypot", "cannot sell", "blacklist", "malicious", "rug", "scam"]):
+            notes.append(f"{label} risk flag")
+
+    return (len(notes) == 0), notes
+
+# =========================================================
 # DEX / GECKO
 # =========================================================
 
@@ -451,7 +496,10 @@ def get_best_pair(mint: str) -> Optional[dict]:
             return None
 
         solana_pairs.sort(
-            key=lambda x: to_float((x.get("liquidity") or {}).get("usd"), 0.0),
+            key=lambda x: (
+                to_float((x.get("liquidity") or {}).get("usd"), 0.0),
+                to_float((x.get("volume") or {}).get("m5"), 0.0),
+            ),
             reverse=True,
         )
         return solana_pairs[0]
@@ -582,7 +630,7 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
         buyers.add(wallet)
         rec["early_unique_buyers"] = list(buyers)
 
-        if len(rec["first_buy_wallets"]) < 10 and wallet not in rec["first_buy_wallets"]:
+        if len(rec["first_buy_wallets"]) < 12 and wallet not in rec["first_buy_wallets"]:
             rec["first_buy_wallets"].append(wallet)
 
         if rec.get("candidate_dev_wallet") is None and len(rec["first_buy_wallets"]) <= 2:
@@ -681,14 +729,20 @@ def anti_honeypot_guard(pair: dict) -> bool:
 def holder_explosion_signal(token_state: dict) -> bool:
     uniq = len(token_state.get("early_unique_buyers", []))
     age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
-    return uniq >= 8 and age_min <= 8
+    return uniq >= 5 and age_min <= 8
 
 
 def early_pump_signal(token_state: dict) -> bool:
     buys = int(token_state.get("early_buys", 0))
     uniq = len(token_state.get("early_unique_buyers", []))
     vol = to_float(token_state.get("early_volume_est", 0.0), 0.0)
-    return buys >= 4 and uniq >= 3 and vol >= 500
+    return buys >= 3 and uniq >= 2 and vol >= 250
+
+
+def wallet_cluster_signal(token_state: dict) -> bool:
+    uniq = len(token_state.get("early_unique_buyers", []))
+    age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
+    return uniq >= 3 and age_min <= 3
 
 
 def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -> int:
@@ -701,9 +755,9 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     total = buys + sells
 
     count = 0
-    if mc > 0 and liq >= mc * 0.15:
+    if mc > 0 and liq >= mc * 0.08:
         count += 1
-    if total >= 3 and buys >= sells:
+    if total >= 2 and buys >= sells:
         count += 1
     if len(token_state.get("smart_wallet_hits", [])) >= 1:
         count += 1
@@ -714,6 +768,8 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     if early_pump_signal(token_state):
         count += 1
     if holder_explosion_signal(token_state):
+        count += 1
+    if wallet_cluster_signal(token_state):
         count += 1
     return count
 
@@ -746,12 +802,12 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     if liq >= mc * 0.7:
         score += 2
-    elif liq >= mc * 0.08:
+    elif liq >= mc * 0.05:
         score += 1
 
-    if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
+    if v1 > 0 and v5 * 12 > v1 * 0.05 and v5 > 400:
         score += 2
-    elif v5 > 1200:
+    elif v5 > 700:
         score += 1
 
     if buys > sells:
@@ -761,20 +817,20 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if buys >= 2:
         score += 1
 
-    if age_min <= 15:
+    if age_min <= 20:
         score += 1
 
     if early_pump_signal(token_state):
         score += 2
-
     if holder_explosion_signal(token_state):
+        score += 2
+    if wallet_cluster_signal(token_state):
         score += 2
 
     score += int(token_state.get("alpha_cluster_score", 0))
 
     if token_state.get("migration_flag"):
         score += 1
-
     if token_state.get("liq_lock_hint"):
         score += 1
 
@@ -788,6 +844,8 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
         score -= 4
     if not token_state.get("tradeability_ok", True):
         score -= 4
+    if not token_state.get("risk_ok", True):
+        score -= 5
 
     return max(0, min(10, score))
 
@@ -806,7 +864,7 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
 
     if age_min <= 8:
         p += 2
-    elif age_min <= 15:
+    elif age_min <= 20:
         p += 1
 
     if token_state.get("first_seen_mc", 0.0) > 0 and token_state.get("first_seen_mc", 0.0) < 20_000:
@@ -814,13 +872,14 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
 
     if mc > 0 and liq >= mc:
         p += 2
-    elif mc > 0 and liq >= mc * 0.12:
+    elif mc > 0 and liq >= mc * 0.08:
         p += 1
 
     if early_pump_signal(token_state):
         p += 2
-
     if holder_explosion_signal(token_state):
+        p += 2
+    if wallet_cluster_signal(token_state):
         p += 2
 
     smart_hits = len(token_state.get("smart_wallet_hits", []))
@@ -841,6 +900,8 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
         p -= 3
     if not token_state.get("tradeability_ok", True):
         p -= 3
+    if not token_state.get("risk_ok", True):
+        p -= 4
 
     return p
 
@@ -850,22 +911,24 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
 
     if hard_red or color == "🔴 RED":
         if mint in HELD_TOKENS:
-            return "RED-EXIT"
+            return "RED"
         return "IGNORE"
 
-    if color != "🟡 GOLD":
-        return "IGNORE"
+    if color == "🟡 GOLD":
+        if live_confirmation_count(pair, token_state, holder_stats) < 2:
+            return "IGNORE"
+        if not can_send_buy_alert():
+            return "IGNORE"
+        return "GOLD"
 
-    if live_confirmation_count(pair, token_state, holder_stats) < 2:
-        return "IGNORE"
+    if color == "🟢 GREEN":
+        if live_confirmation_count(pair, token_state, holder_stats) < 2:
+            return "IGNORE"
+        if not can_send_buy_alert():
+            return "IGNORE"
+        return "GREEN"
 
-    if not can_send_buy_alert():
-        return "IGNORE"
-
-    priority = compute_priority(pair, token_state, holder_stats, score)
-    if priority >= 9:
-        return "GOLD-A"
-    return "GOLD-B"
+    return "IGNORE"
 
 # =========================================================
 # PAPER TRADING
@@ -875,7 +938,7 @@ def open_paper_position(mint: str, token_state: dict, pair: dict, alert_type: st
     if mint in STATE.get("paper_positions", {}):
         return
 
-    size = PAPER_GOLD_A_SIZE_EUR if alert_type == "GOLD-A" else PAPER_GOLD_B_SIZE_EUR
+    size = PAPER_GOLD_SIZE_EUR if alert_type == "GOLD" else PAPER_GREEN_SIZE_EUR
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     name = token_state.get("name") or mint[:6]
     source = token_state.get("source", "unknown")
@@ -1010,32 +1073,42 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
     age_min = int(max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0))
     pair_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
-    top1 = holder_stats.get("top1_pct", 0.0) * 100
-    top3 = holder_stats.get("top3_pct", 0.0) * 100
+    reasons = []
+    if wallet_cluster_signal(token_state):
+        reasons.append("wallet cluster")
+    if early_pump_signal(token_state):
+        reasons.append("early buys")
+    if holder_explosion_signal(token_state):
+        reasons.append("buyers rising")
+    if len(token_state.get("smart_wallet_hits", [])) >= 1:
+        reasons.append("smart wallet")
+    if token_state.get("migration_flag"):
+        reasons.append("migration")
+    if token_state.get("liq_lock_hint"):
+        reasons.append("lock hint")
 
-    source = token_state.get("source", "unknown")
-    dev_sold = token_state.get("dev_sold", False)
-    liq_lock = token_state.get("liq_lock_hint", False)
-    tradeability_ok = token_state.get("tradeability_ok", True)
-    migration_flag = token_state.get("migration_flag", False)
+    if not reasons:
+        reasons.append("momentum")
 
-    if alert_type == "GOLD-A":
-        header = f"🟡 GOLD-A | {name}"
+    reason_text = ", ".join(reasons[:3])
+
+    if alert_type == "GOLD":
+        color = "🟡 GOLD"
         action = "Buy 50€"
-    elif alert_type == "GOLD-B":
-        header = f"🟡 GOLD-B | {name}"
+    elif alert_type == "GREEN":
+        color = "🟢 GREEN"
         action = "Buy 25€"
     else:
-        header = f"🔴 RED | {name}"
+        color = "🔴 RED"
         action = "Sell"
 
     return (
-        f"{header}\n"
-        f"Score {score}/10 | Age {age_min}m | Source {source}\n"
-        f"MC {compact_k(mc)} | Liq {compact_k(liq)} | First {compact_k(token_state.get('first_seen_mc', mc))} | Max {compact_k(token_state.get('max_seen_mc', mc))}\n"
-        f"Top1 {top1:.1f}% | Top3 {top3:.1f}%\n"
-        f"Flags: migration {'✅' if migration_flag else '❌'} | lock {'✅' if liq_lock else '❌'} | dev_sell {'✅' if dev_sold else '❌'} | trade {'✅' if tradeability_ok else '❌'}\n"
-        f"Early: buys {token_state.get('early_buys', 0)} | uniq {len(token_state.get('early_unique_buyers', []))} | alpha {len(token_state.get('smart_wallet_hits', []))}\n"
+        f"{name}\n"
+        f"Score: {score}/10\n"
+        f"Color: {color}\n"
+        f"Market cap: ${compact_k(mc)}\n"
+        f"Liquidity: ${compact_k(liq)}\n"
+        f"Reason: {reason_text}\n"
         f"Action: {action}\n"
         f"Dex: <{pair_url}>"
     )
@@ -1068,6 +1141,9 @@ def evaluate_token(mint: str) -> None:
     token_state["liq_lock_hint"] = liquidity_lock_hint(pair)
     token_state["tradeability_ok"] = anti_honeypot_guard(pair)
 
+    risk_ok, _risk_notes = optional_risk_check(mint)
+    token_state["risk_ok"] = risk_ok
+
     if token_state["first_seen_mc"] <= 0 and mc > 0:
         token_state["first_seen_mc"] = mc
     token_state["max_seen_mc"] = max(token_state.get("max_seen_mc", 0.0), mc)
@@ -1078,17 +1154,17 @@ def evaluate_token(mint: str) -> None:
         return
     if age_min < 1:
         return
-    if vol24 > 0 and v5 > vol24 * 0.9:
+    if vol24 > 0 and v5 > vol24 * 1.1:
         return
-    if v1 > 0 and v5 > v1 * 1.6:
+    if v1 > 0 and v5 > v1 * 2.0:
         return
 
-    if token_state.get("source") == "gecko_new_pool" and age_min > 35:
+    if token_state.get("source") == "gecko_new_pool" and age_min > 45:
         return
 
     holder_stats = get_holder_stats(mint)
 
-    if not holder_stats.get("enabled") and mc > 250_000:
+    if not holder_stats.get("enabled") and mc > 400_000:
         return
 
     hard_red = False
@@ -1104,15 +1180,25 @@ def evaluate_token(mint: str) -> None:
         hard_red = True
     if not token_state.get("tradeability_ok", True):
         hard_red = True
+    if not token_state.get("risk_ok", True):
+        hard_red = True
 
     score = compute_score(pair, token_state, holder_stats)
-    color = "🔴 RED" if (hard_red or score < GOLD_SCORE) else "🟡 GOLD"
-    alert_type = classify_alert_type(color, pair, token_state, holder_stats, score, hard_red)
 
+    if hard_red:
+        color = "🔴 RED"
+    elif score >= GOLD_SCORE:
+        color = "🟡 GOLD"
+    elif score >= GREEN_SCORE:
+        color = "🟢 GREEN"
+    else:
+        color = "IGNORE"
+
+    alert_type = classify_alert_type(color, pair, token_state, holder_stats, score, hard_red)
     if alert_type == "IGNORE":
         return
 
-    alert_key = f"BUY:{mint}" if alert_type in {"GOLD-A", "GOLD-B"} else f"SELL:{mint}"
+    alert_key = f"{alert_type}:{mint}"
     if recently_alerted(alert_key):
         return
 
@@ -1143,10 +1229,11 @@ def evaluate_token(mint: str) -> None:
         early_unique_buyers=len(token_state.get("early_unique_buyers", [])),
         dev_sold=bool(token_state.get("dev_sold", False)),
         tradeability_ok=bool(token_state.get("tradeability_ok", True)),
+        risk_ok=bool(token_state.get("risk_ok", True)),
         dex_url=dex_url,
     )
 
-    if alert_type in {"GOLD-A", "GOLD-B"}:
+    if alert_type in {"GOLD", "GREEN"}:
         mark_buy_alert_sent()
         open_paper_position(mint, token_state, pair, alert_type)
 
