@@ -52,12 +52,12 @@ BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 2
 
 MAX_MARKET_CAP = 5_000_000
-MIN_LIQUIDITY = 2_000
-MIN_LIQ_TO_MC_RATIO = 0.10
+MIN_LIQUIDITY = 1_500
+MIN_LIQ_TO_MC_RATIO = 0.08
 WASH_RATIO_LIMIT = 35.0
 NO_CHASE_MULTIPLIER = 2.0
-MAX_TRACKED_TOKENS = 220
-GECKO_MAX_ADD_PER_CYCLE = 60
+MAX_TRACKED_TOKENS = 260
+GECKO_MAX_ADD_PER_CYCLE = 70
 
 GOLD_SCORE = 8
 
@@ -681,14 +681,14 @@ def anti_honeypot_guard(pair: dict) -> bool:
 def holder_explosion_signal(token_state: dict) -> bool:
     uniq = len(token_state.get("early_unique_buyers", []))
     age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
-    return uniq >= 8 and age_min <= 6
+    return uniq >= 8 and age_min <= 8
 
 
 def early_pump_signal(token_state: dict) -> bool:
     buys = int(token_state.get("early_buys", 0))
     uniq = len(token_state.get("early_unique_buyers", []))
     vol = to_float(token_state.get("early_volume_est", 0.0), 0.0)
-    return buys >= 6 and uniq >= 4 and vol >= 1000
+    return buys >= 4 and uniq >= 3 and vol >= 500
 
 
 def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -> int:
@@ -701,9 +701,9 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     total = buys + sells
 
     count = 0
-    if mc > 0 and liq >= mc * 0.25:
+    if mc > 0 and liq >= mc * 0.15:
         count += 1
-    if total >= 4 and buys >= sells:
+    if total >= 3 and buys >= sells:
         count += 1
     if len(token_state.get("smart_wallet_hits", [])) >= 1:
         count += 1
@@ -746,22 +746,22 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     if liq >= mc * 0.7:
         score += 2
-    elif liq >= mc * 0.15:
+    elif liq >= mc * 0.08:
         score += 1
 
-    if v1 > 0 and v5 * 12 > v1 * 0.10 and v5 > 1000:
+    if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
         score += 2
-    elif v5 > 2000:
+    elif v5 > 1200:
         score += 1
 
     if buys > sells:
         score += 1
-    if buy_ratio > 0.52:
+    if buy_ratio > 0.50:
         score += 1
-    if buys >= 3:
+    if buys >= 2:
         score += 1
 
-    if age_min <= 12:
+    if age_min <= 15:
         score += 1
 
     if early_pump_signal(token_state):
@@ -804,9 +804,9 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
     elif score >= 8:
         p += 1
 
-    if age_min <= 6:
+    if age_min <= 8:
         p += 2
-    elif age_min <= 12:
+    elif age_min <= 15:
         p += 1
 
     if token_state.get("first_seen_mc", 0.0) > 0 and token_state.get("first_seen_mc", 0.0) < 20_000:
@@ -814,7 +814,7 @@ def compute_priority(pair: dict, token_state: dict, holder_stats: dict, score: i
 
     if mc > 0 and liq >= mc:
         p += 2
-    elif mc > 0 and liq >= mc * 0.20:
+    elif mc > 0 and liq >= mc * 0.12:
         p += 1
 
     if early_pump_signal(token_state):
@@ -856,7 +856,7 @@ def classify_alert_type(color: str, pair: dict, token_state: dict, holder_stats:
     if color != "🟡 GOLD":
         return "IGNORE"
 
-    if live_confirmation_count(pair, token_state, holder_stats) < 3:
+    if live_confirmation_count(pair, token_state, holder_stats) < 2:
         return "IGNORE"
 
     if not can_send_buy_alert():
@@ -1078,17 +1078,17 @@ def evaluate_token(mint: str) -> None:
         return
     if age_min < 1:
         return
-    if vol24 > 0 and v5 > vol24 * 0.7:
+    if vol24 > 0 and v5 > vol24 * 0.9:
         return
-    if v1 > 0 and v5 > v1 * 1.2:
+    if v1 > 0 and v5 > v1 * 1.6:
         return
 
-    if token_state.get("source") == "gecko_new_pool" and age_min > 25:
+    if token_state.get("source") == "gecko_new_pool" and age_min > 35:
         return
 
     holder_stats = get_holder_stats(mint)
 
-    if not holder_stats.get("enabled") and mc > 160_000:
+    if not holder_stats.get("enabled") and mc > 250_000:
         return
 
     hard_red = False
