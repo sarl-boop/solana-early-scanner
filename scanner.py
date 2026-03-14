@@ -21,7 +21,6 @@ SMART_WALLETS = {
     x.strip() for x in os.environ.get("SMART_WALLETS", "").split(",") if x.strip()
 }
 
-# Optional: only if you actually hold some tokens and want RED-EXIT on them
 HELD_TOKENS = {
     x.strip() for x in os.environ.get("HELD_TOKENS", "").split(",") if x.strip()
 }
@@ -53,12 +52,12 @@ BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 2
 
 MAX_MARKET_CAP = 5_000_000
-MIN_LIQUIDITY = 15_000
-MIN_LIQ_TO_MC_RATIO = 0.50
+MIN_LIQUIDITY = 8_000
+MIN_LIQ_TO_MC_RATIO = 0.35
 WASH_RATIO_LIMIT = 35.0
 NO_CHASE_MULTIPLIER = 2.0
-MAX_TRACKED_TOKENS = 80
-GECKO_MAX_ADD_PER_CYCLE = 12
+MAX_TRACKED_TOKENS = 120
+GECKO_MAX_ADD_PER_CYCLE = 25
 
 GOLD_SCORE = 8
 
@@ -71,8 +70,8 @@ LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead"]
 
 PAPER_GOLD_A_SIZE_EUR = 50
 PAPER_GOLD_B_SIZE_EUR = 25
-PAPER_WINNER_ROI = 2.0   # +200%
-PAPER_STOP_ROI = -0.35   # -35%
+PAPER_WINNER_ROI = 2.0
+PAPER_STOP_ROI = -0.35
 ALPHA_MIN_TRADES = 3
 ALPHA_MIN_WIN_RATE = 0.40
 
@@ -169,7 +168,6 @@ def cleanup_state() -> None:
         if now - int(rec.get("last_seen_ts", 0)) < TOKEN_TTL_SECONDS:
             keep_tokens[mint] = rec
 
-    # hard cap to avoid huge spikes living too long
     ordered = sorted(
         keep_tokens.items(),
         key=lambda kv: int(kv[1].get("last_seen_ts", 0)),
@@ -206,7 +204,6 @@ def send_discord(msg: str) -> None:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
     except Exception as e:
         print("discord send error:", e)
-
 
 # =========================================================
 # CSV LOGS
@@ -588,7 +585,6 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
         if len(rec["first_buy_wallets"]) < 10 and wallet not in rec["first_buy_wallets"]:
             rec["first_buy_wallets"].append(wallet)
 
-        # dev sell detector: earliest buyer as likely dev/cabal wallet
         if rec.get("candidate_dev_wallet") is None and len(rec["first_buy_wallets"]) <= 2:
             rec["candidate_dev_wallet"] = wallet
 
@@ -614,7 +610,6 @@ def add_smart_wallet_hit(mint: str, wallet: str) -> None:
     hits.add(wallet)
     rec["smart_wallet_hits"] = list(hits)
 
-    # smart wallet copy radar
     hit_count = len(rec["smart_wallet_hits"])
     if hit_count >= 4:
         rec["alpha_cluster_score"] = 5
@@ -684,7 +679,6 @@ def anti_honeypot_guard(pair: dict) -> bool:
 
 
 def holder_explosion_signal(token_state: dict) -> bool:
-    # holder explosion radar approximation using early unique buyers
     uniq = len(token_state.get("early_unique_buyers", []))
     age_min = max(0.0, (now_ts() - int(token_state.get("first_seen_ts", now_ts()))) / 60.0)
     return uniq >= 8 and age_min <= 5
@@ -745,25 +739,21 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     score = 0
 
-    # microcap priority
     if mc < 50_000:
         score += 2
     elif mc < 200_000:
         score += 1
 
-    # liquidity strength
     if liq >= mc * 0.7:
         score += 2
     elif liq >= mc * 0.5:
         score += 1
 
-    # volume acceleration
     if v1 > 0 and v5 * 12 > v1 * 0.24 and v5 > 3500:
         score += 2
     elif v5 > 6000:
         score += 1
 
-    # buy pressure
     if buys > sells:
         score += 1
     if buy_ratio > 0.60:
@@ -771,30 +761,23 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if buys >= 7:
         score += 1
 
-    # very early
     if age_min <= 8:
         score += 1
 
-    # early radar signals
     if early_pump_signal(token_state):
         score += 2
 
-    # holder explosion
     if holder_explosion_signal(token_state):
         score += 2
 
-    # wallet copy / alpha cluster
     score += int(token_state.get("alpha_cluster_score", 0))
 
-    # migration
     if token_state.get("migration_flag"):
         score += 1
 
-    # liq lock hint
     if token_state.get("liq_lock_hint"):
         score += 1
 
-    # penalties
     if holder_stats.get("soft_penalty"):
         score -= 2
     if sniper_trap_risk(token_state):
@@ -1100,13 +1083,12 @@ def evaluate_token(mint: str) -> None:
     if v1 > 0 and v5 > v1 * 0.6:
         return
 
-    # gecko-only candidates expire quickly
     if token_state.get("source") == "gecko_new_pool" and age_min > 12:
         return
 
     holder_stats = get_holder_stats(mint)
 
-    if not holder_stats.get("enabled") and mc > 40_000:
+    if not holder_stats.get("enabled") and mc > 60_000:
         return
 
     hard_red = False
@@ -1196,11 +1178,9 @@ async def websocket_loop():
             async with websockets.connect(PUMPPORTAL_WS, ping_interval=20, ping_timeout=20) as ws:
                 dbg("connected to PumpPortal")
 
-                # official early radar
                 await subscribe(ws, "subscribeNewToken")
                 await subscribe(ws, "subscribeMigration")
 
-                # smart wallet copy radar
                 all_alpha_wallets = list(set(SMART_WALLETS) | learned_alpha_wallets())
                 if all_alpha_wallets:
                     await subscribe(ws, "subscribeAccountTrade", all_alpha_wallets)
@@ -1214,12 +1194,10 @@ async def websocket_loop():
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
-                    # pump.fun early radar
                     if mint and ("name" in payload and "symbol" in payload):
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
                         await subscribe_token_trade_once(ws, mint)
 
-                    # migration radar
                     if mint and "migration" in event_text:
                         ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
                         await subscribe_token_trade_once(ws, mint)
@@ -1244,7 +1222,7 @@ async def websocket_loop():
             await asyncio.sleep(5)
 
 # =========================================================
-# GECKO LOOP (BUG FIX)
+# GECKO LOOP
 # =========================================================
 
 async def gecko_new_pools_loop():
@@ -1262,7 +1240,6 @@ async def gecko_new_pools_loop():
                 if mint in STATE["tokens"]:
                     continue
 
-                # pre-filter BEFORE storing
                 pair = get_best_pair(mint)
                 if not pair:
                     continue
