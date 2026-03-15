@@ -10,19 +10,11 @@ import requests
 import websockets
 
 # =========================================================
-# DESK-PRO ARCHITECTURE (single file)
-# =========================================================
-# Stage 1  : Raw market ingestion
-# Stage 2  : Discovery filter
-# Stage 3  : Deep conviction scoring
-# Stage 4  : Silent shortlist
-# Stage 5  : GOLD / RED action layer
-#
-# Goal:
-# - conviction bot
-# - x50/x100 candidates
+# DESK MODE
+# - Conviction bot
 # - x100 wallet hunter
-# - silent shortlist (no Discord)
+# - silent shortlist
+# - FAST ROI path + SWING CONVICTION path
 # - no GREEN
 # =========================================================
 
@@ -71,9 +63,9 @@ ALERT_COOLDOWN_SECONDS = 8 * 3600
 SHORTLIST_COOLDOWN_SECONDS = 3 * 3600
 
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
-MAX_BUY_ALERTS_PER_WINDOW = 2  # conviction mode = rare alerts
+MAX_BUY_ALERTS_PER_WINDOW = 2
 
-# discovery universe
+# discovery
 MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 1500
 MIN_LIQ_TO_MC_RATIO = 0.12
@@ -82,7 +74,7 @@ NO_CHASE_MULTIPLIER = 2.5
 MAX_TRACKED_TOKENS = 700
 GECKO_MAX_ADD_PER_CYCLE = 120
 
-# conviction
+# gold / shortlist
 GOLD_SCORE = 8
 SHORTLIST_SCORE = 6
 
@@ -100,26 +92,28 @@ TOP3_SOFT_PENALTY = 0.40
 
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead", "renounced"]
 
-# paper mode
+# paper
 PAPER_GOLD_SIZE_EUR = 50
-PAPER_WINNER_ROI = 2.0      # +200%
-PAPER_STOP_ROI = -0.35      # -35%
+PAPER_WINNER_ROI = 2.0
+PAPER_STOP_ROI = -0.35
 
-# x100 hunter
+# wallet hunter
 WALLET_HUNTER_X100_ROI = 100.0
 WALLET_HUNTER_FALLBACK_ROI = 20.0
 WALLET_HUNTER_FALLBACK_WINS = 2
 
-# micro structure
+# microstructure
 BURST_WINDOW_SECONDS = 30
 CLUSTER_WINDOW_SECONDS = 60
 PREMIGRATION_WINDOW_SECONDS = 180
+ELITE_PREBUY_WINDOW_SECONDS = 120
 
 BURST_MIN_BUYS = 5
 CLUSTER_MIN_UNIQ = 4
 LIQUIDITY_ADD_MIN_USD = 5000
 LIQUIDITY_ADD_RATIO = 1.8
 DEV_ACCUM_MIN_BUYS = 3
+ELITE_PREBUY_MIN_USD = 150.0
 
 DEBUG = True
 
@@ -279,8 +273,8 @@ def ensure_alert_log_file() -> None:
             "timestamp", "alert_type", "mint", "name", "source", "score",
             "market_cap", "liquidity", "first_seen_mc", "max_seen_mc", "age_min",
             "top1_pct", "top3_pct", "migration_flag", "alpha_hits", "x100_hits",
-            "early_buys", "early_unique_buyers", "dev_sold", "tradeability_ok",
-            "risk_ok", "dex_url"
+            "elite_prebuy_hits", "early_buys", "early_unique_buyers", "dev_sold",
+            "tradeability_ok", "risk_ok", "dex_url"
         ])
 
 
@@ -322,6 +316,7 @@ def log_alert_csv(
     migration_flag: bool,
     alpha_hits: int,
     x100_hits: int,
+    elite_prebuy_hits: int,
     early_buys: int,
     early_unique_buyers: int,
     dev_sold: bool,
@@ -338,8 +333,8 @@ def log_alert_csv(
                 round(market_cap, 2), round(liquidity, 2),
                 round(first_seen_mc, 2), round(max_seen_mc, 2), round(age_min, 2),
                 round(top1_pct, 4), round(top3_pct, 4), migration_flag,
-                alpha_hits, x100_hits, early_buys, early_unique_buyers,
-                dev_sold, tradeability_ok, risk_ok, dex_url
+                alpha_hits, x100_hits, elite_prebuy_hits, early_buys,
+                early_unique_buyers, dev_sold, tradeability_ok, risk_ok, dex_url
             ])
     except Exception as e:
         print("alert log write error:", e)
@@ -427,6 +422,7 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "last_liq_change_ts": 0,
         "smart_wallet_hits": [],
         "x100_wallet_hits": [],
+        "elite_prebuy_hits": [],
         "buy_wallet_counts": {},
         "sell_wallet_counts": {},
         "first_buy_wallets": [],
@@ -472,6 +468,13 @@ def add_x100_hit(mint: str, wallet: str) -> None:
     hits = set(rec.get("x100_wallet_hits", []))
     hits.add(wallet)
     rec["x100_wallet_hits"] = list(hits)
+
+
+def add_elite_prebuy_hit(mint: str, wallet: str) -> None:
+    rec = ensure_token(mint)
+    hits = set(rec.get("elite_prebuy_hits", []))
+    hits.add(wallet)
+    rec["elite_prebuy_hits"] = list(hits)
 
 # =========================================================
 # WALLET LEARNING
@@ -520,7 +523,7 @@ def update_wallet_stats_from_winner(wallet: str, roi_multiple: float) -> None:
         STATE["x100_discovered_wallets"] = list(elite)
 
 # =========================================================
-# SOLANA RPC / HOLDERS
+# RPC / HOLDERS
 # =========================================================
 
 def rpc_call(method: str, params: list) -> Optional[dict]:
@@ -587,7 +590,7 @@ def get_holder_stats(mint: str) -> dict:
     }
 
 # =========================================================
-# OPTIONAL RISK CHECKS
+# OPTIONAL RISK
 # =========================================================
 
 def fetch_optional_json(url: str, mint: str) -> Optional[dict]:
@@ -832,13 +835,20 @@ def dev_accumulation_signal(token_state: dict) -> bool:
     return any(c >= DEV_ACCUM_MIN_BUYS for c in counts.values())
 
 
+def elite_prebuy_signal(token_state: dict) -> bool:
+    age = now_ts() - int(token_state.get("launch_seen_ts", token_state.get("first_seen_ts", now_ts())))
+    elite_hits = len(token_state.get("elite_prebuy_hits", []))
+    return age <= ELITE_PREBUY_WINDOW_SECONDS and elite_hits >= 1 and not token_state.get("migration_flag", False)
+
+
 def pre_migration_x50_signal(token_state: dict) -> bool:
     age = now_ts() - int(token_state.get("launch_seen_ts", token_state.get("first_seen_ts", now_ts())))
     return (
         age <= PREMIGRATION_WINDOW_SECONDS
         and not token_state.get("migration_flag", False)
         and (
-            volume_burst_signal(token_state)
+            elite_prebuy_signal(token_state)
+            or volume_burst_signal(token_state)
             or wallet_cluster_signal(token_state)
             or dev_accumulation_signal(token_state)
             or len(token_state.get("x100_wallet_hits", [])) >= 1
@@ -846,7 +856,7 @@ def pre_migration_x50_signal(token_state: dict) -> bool:
     )
 
 # =========================================================
-# TRADE TRACKING
+# TRACKING
 # =========================================================
 
 def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: float = 0.0) -> None:
@@ -870,7 +880,7 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
         buyers.add(wallet)
         rec["early_unique_buyers"] = list(buyers)
 
-        if len(rec["first_buy_wallets"]) < 12 and wallet not in rec["first_buy_wallets"]:
+        if len(rec["first_buy_wallets"]) < 16 and wallet not in rec["first_buy_wallets"]:
             rec["first_buy_wallets"].append(wallet)
 
         if rec.get("candidate_dev_wallet") is None and len(rec["first_buy_wallets"]) <= 2:
@@ -881,6 +891,16 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
             "wallet": wallet,
             "usd": usd_est,
         })
+
+        # elite prebuy detector
+        token_age = ts - int(rec.get("launch_seen_ts", ts))
+        if (
+            wallet in learned_x100_wallets()
+            and token_age <= ELITE_PREBUY_WINDOW_SECONDS
+            and usd_est >= ELITE_PREBUY_MIN_USD
+            and not rec.get("migration_flag", False)
+        ):
+            add_elite_prebuy_hit(mint, wallet)
 
     else:
         rec["early_sells"] = int(rec.get("early_sells", 0)) + 1
@@ -905,7 +925,7 @@ def update_trade_tracking(mint: str, wallet: Optional[str], side: str, usd_est: 
     update_wallet_stats_from_trade(wallet)
 
 # =========================================================
-# RISK / SIGNALS
+# RISK / STRUCTURE
 # =========================================================
 
 def sniper_trap_risk(token_state: dict) -> bool:
@@ -1016,7 +1036,7 @@ def cult_meme_proxy_signal(token_state: dict, pair: dict, holder_stats: dict) ->
     )
 
 
-def conviction_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+def swing_conviction_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
     if mc <= 0 or liq <= 0:
@@ -1034,14 +1054,44 @@ def conviction_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool
         and not token_state.get("lp_risk", False)
         and not dev_supply_proxy_risk(token_state)
         and not token_state.get("dev_sold", False)
-        and (x100_hits >= 1 or cult_meme_proxy_signal(token_state, pair, holder_stats) or liquidity_add_signal(token_state))
+        and (
+            x100_hits >= 1
+            or cult_meme_proxy_signal(token_state, pair, holder_stats)
+            or liquidity_add_signal(token_state)
+        )
+    )
+
+
+def fast_roi_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    if mc <= 0 or liq <= 0:
+        return False
+
+    ratio = liq / mc
+    return (
+        12_000 <= mc <= 180_000
+        and ratio >= 0.30
+        and not holder_stats.get("hard_reject", False)
+        and not token_state.get("dev_sold", False)
+        and not token_state.get("lp_risk", False)
+        and not dev_supply_proxy_risk(token_state)
+        and (
+            elite_prebuy_signal(token_state)
+            or (
+                len(token_state.get("x100_wallet_hits", [])) >= 1
+                and (volume_burst_signal(token_state) or liquidity_add_signal(token_state))
+            )
+            or (
+                pre_migration_x50_signal(token_state)
+                and wallet_cluster_signal(token_state)
+            )
+        )
     )
 
 
 def x100_wallet_hunter_signal(token_state: dict) -> bool:
-    x100_hits = len(token_state.get("x100_wallet_hits", []))
-    alpha_hits = len(token_state.get("smart_wallet_hits", []))
-    return x100_hits >= 1 or (x100_hits >= 1 and alpha_hits >= 1)
+    return len(token_state.get("x100_wallet_hits", [])) >= 1
 
 
 def momentum_only_signal(token_state: dict) -> bool:
@@ -1053,25 +1103,24 @@ def momentum_only_signal(token_state: dict) -> bool:
         and not holder_explosion_signal(token_state)
         and len(token_state.get("smart_wallet_hits", [])) == 0
         and len(token_state.get("x100_wallet_hits", [])) == 0
+        and len(token_state.get("elite_prebuy_hits", [])) == 0
         and not dev_accumulation_signal(token_state)
         and not pre_migration_x50_signal(token_state)
         and not token_state.get("migration_flag", False)
     )
 
 
-def has_real_conviction_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
-    signals = 0
-    if conviction_signal(token_state, pair, holder_stats):
-        signals += 1
+def has_real_action_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    paths = 0
+    if fast_roi_signal(token_state, pair, holder_stats):
+        paths += 1
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        paths += 1
     if x100_wallet_hunter_signal(token_state):
-        signals += 1
-    if liquidity_add_signal(token_state):
-        signals += 1
-    if pre_migration_x50_signal(token_state):
-        signals += 1
+        paths += 1
     if cult_meme_proxy_signal(token_state, pair, holder_stats):
-        signals += 1
-    return signals >= 2
+        paths += 1
+    return paths >= 1
 
 
 def liquidity_quality_tier(mc: float, liq: float) -> str:
@@ -1103,6 +1152,8 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 1
     if len(token_state.get("x100_wallet_hits", [])) >= 1:
         count += 2
+    if len(token_state.get("elite_prebuy_hits", [])) >= 1:
+        count += 3
     if token_state.get("migration_flag", False):
         count += 1
     if holder_stats.get("enabled"):
@@ -1118,10 +1169,12 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     if liquidity_add_signal(token_state):
         count += 2
     if dev_accumulation_signal(token_state):
-        count += 2
+        count += 1
     if pre_migration_x50_signal(token_state):
         count += 2
-    if conviction_signal(token_state, pair, holder_stats):
+    if fast_roi_signal(token_state, pair, holder_stats):
+        count += 2
+    if swing_conviction_signal(token_state, pair, holder_stats):
         count += 2
     return count
 
@@ -1192,6 +1245,8 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
         score += 1
     if pre_migration_x50_signal(token_state):
         score += 3
+    if elite_prebuy_signal(token_state):
+        score += 4
 
     alpha_hits = len(token_state.get("smart_wallet_hits", []))
     x100_hits = len(token_state.get("x100_wallet_hits", []))
@@ -1203,7 +1258,9 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     if cult_meme_proxy_signal(token_state, pair, holder_stats):
         score += 2
-    if conviction_signal(token_state, pair, holder_stats):
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        score += 3
+    if fast_roi_signal(token_state, pair, holder_stats):
         score += 3
 
     if token_state.get("migration_flag", False):
@@ -1234,23 +1291,23 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     return max(0, min(10, score))
 
 # =========================================================
-# SHORTLIST / ALERT CLASSIFICATION
+# SHORTLIST / ALERT
 # =========================================================
 
 def shortlist_reasons(token_state: dict, pair: dict, holder_stats: dict) -> List[str]:
     reasons = []
+    if elite_prebuy_signal(token_state):
+        reasons.append("elite prebuy")
     if len(token_state.get("x100_wallet_hits", [])) >= 1:
         reasons.append("x100 wallet")
-    if conviction_signal(token_state, pair, holder_stats):
-        reasons.append("conviction")
+    if fast_roi_signal(token_state, pair, holder_stats):
+        reasons.append("fast roi")
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        reasons.append("swing conviction")
     if cult_meme_proxy_signal(token_state, pair, holder_stats):
         reasons.append("cult meme proxy")
     if liquidity_add_signal(token_state):
         reasons.append("liquidity add")
-    if wallet_cluster_signal(token_state):
-        reasons.append("wallet cluster")
-    if pre_migration_x50_signal(token_state):
-        reasons.append("pre-migration x50")
     if not reasons:
         reasons.append("near-threshold")
     return reasons[:3]
@@ -1274,7 +1331,7 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
     if not can_send_buy_alert():
         return "IGNORE"
 
-    if has_real_conviction_signal(token_state, pair, holder_stats) and live_confirmation_count(pair, token_state, holder_stats) >= 5 and score >= GOLD_SCORE:
+    if has_real_action_signal(token_state, pair, holder_stats) and live_confirmation_count(pair, token_state, holder_stats) >= 5 and score >= GOLD_SCORE:
         return "GOLD"
 
     return "IGNORE"
@@ -1301,7 +1358,9 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
     if not token_state.get("risk_ok", True):
         return False
     return (
-        conviction_signal(token_state, pair, holder_stats)
+        elite_prebuy_signal(token_state)
+        or fast_roi_signal(token_state, pair, holder_stats)
+        or swing_conviction_signal(token_state, pair, holder_stats)
         or len(token_state.get("x100_wallet_hits", [])) >= 1
         or cult_meme_proxy_signal(token_state, pair, holder_stats)
     )
@@ -1441,7 +1500,7 @@ async def paper_positions_loop():
         await asyncio.sleep(PAPER_CHECK_INTERVAL_SECONDS)
 
 # =========================================================
-# ALERT BUILD
+# ALERT MESSAGE
 # =========================================================
 
 def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, alert_type: str) -> str:
@@ -1452,18 +1511,18 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
     pair_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
     reasons = []
+    if elite_prebuy_signal(token_state):
+        reasons.append("elite prebuy")
     if len(token_state.get("x100_wallet_hits", [])) >= 1:
         reasons.append("x100 wallet hunter")
-    if conviction_signal(token_state, pair, holder_stats):
-        reasons.append("conviction")
+    if fast_roi_signal(token_state, pair, holder_stats):
+        reasons.append("fast roi")
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        reasons.append("swing conviction")
     if cult_meme_proxy_signal(token_state, pair, holder_stats):
         reasons.append("cult meme proxy")
     if liquidity_add_signal(token_state):
         reasons.append("liquidity add")
-    if wallet_cluster_signal(token_state):
-        reasons.append("wallet cluster")
-    if pre_migration_x50_signal(token_state):
-        reasons.append("pre-migration x50")
     if not reasons:
         reasons.append("risk change")
 
@@ -1633,6 +1692,7 @@ def evaluate_token(mint: str) -> None:
         migration_flag=bool(token_state.get("migration_flag", False)),
         alpha_hits=len(token_state.get("smart_wallet_hits", [])),
         x100_hits=len(token_state.get("x100_wallet_hits", [])),
+        elite_prebuy_hits=len(token_state.get("elite_prebuy_hits", [])),
         early_buys=int(token_state.get("early_buys", 0)),
         early_unique_buyers=len(token_state.get("early_unique_buyers", [])),
         dev_sold=bool(token_state.get("dev_sold", False)),
@@ -1646,7 +1706,7 @@ def evaluate_token(mint: str) -> None:
         open_paper_position(mint, token_state, pair, alert_type)
 
 # =========================================================
-# WEBSOCKET HELPERS
+# WS HELPERS
 # =========================================================
 
 async def subscribe(ws, method: str, keys: Optional[List[str]] = None):
@@ -1808,7 +1868,7 @@ async def gecko_new_pools_loop():
         await asyncio.sleep(GECKO_REFRESH_SECONDS)
 
 # =========================================================
-# BACKGROUND LOOPS
+# LOOPS
 # =========================================================
 
 async def evaluator_loop():
@@ -1846,7 +1906,7 @@ async def heartbeat_loop():
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — filtered_out {filtered_out} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — paper open {paper_open} — x100 wallets {learned_x100} — conviction desk mode"
+                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — filtered_out {filtered_out} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — paper open {paper_open} — x100 wallets {learned_x100} — fast+swing conviction mode"
                 )
 
                 STATE["last_heartbeat"] = now
