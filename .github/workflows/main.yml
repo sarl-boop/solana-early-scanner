@@ -1,19 +1,22 @@
-name: Crypto Scanner Live
+name: Solana Sniper Scanner
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
 
-jobs:
-  scan:
-    runs-on: ubuntu-latest
+concurrency:
+  group: solana-sniper-bot
+  cancel-in-progress: true
 
-    concurrency:
-      group: crypto-scanner-live
-      cancel-in-progress: false
+jobs:
+  run-bot:
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -25,17 +28,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests websockets
 
       - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          PUMPPORTAL_API_KEY: ${{ secrets.PUMPPORTAL_API_KEY }}
+
           SMART_WALLETS: ${{ secrets.SMART_WALLETS }}
           HELD_TOKENS: ${{ secrets.HELD_TOKENS }}
-          PUMPPORTAL_API_KEY: ${{ secrets.PUMPPORTAL_API_KEY }}
+
           RUGCHECK_URL: ${{ secrets.RUGCHECK_URL }}
           GOPLUS_URL: ${{ secrets.GOPLUS_URL }}
           HONEYPOT_URL: ${{ secrets.HONEYPOT_URL }}
+
         run: |
           python scanner.py
