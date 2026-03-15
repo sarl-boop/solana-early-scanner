@@ -11,12 +11,10 @@ concurrency:
 
 jobs:
   run-bot:
-
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -35,13 +33,10 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
           PUMPPORTAL_API_KEY: ${{ secrets.PUMPPORTAL_API_KEY }}
-
           SMART_WALLETS: ${{ secrets.SMART_WALLETS }}
           HELD_TOKENS: ${{ secrets.HELD_TOKENS }}
-
           RUGCHECK_URL: ${{ secrets.RUGCHECK_URL }}
           GOPLUS_URL: ${{ secrets.GOPLUS_URL }}
           HONEYPOT_URL: ${{ secrets.HONEYPOT_URL }}
-
         run: |
           python scanner.py
