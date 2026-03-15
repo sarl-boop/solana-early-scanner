@@ -101,7 +101,13 @@ LIQUIDITY_ADD_RATIO = 1.8
 DEV_ACCUM_MIN_BUYS = 3
 ELITE_PREBUY_MIN_USD = 150.0
 
-# early liquidity migration detector
+GRAD_PREDICT_WINDOW_SECONDS = 300
+GRAD_PREDICT_MIN_BUYS = 8
+GRAD_PREDICT_MIN_UNIQ = 6
+GRAD_PREDICT_MIN_VOL = 1200.0
+GRAD_PREDICT_MIN_LIQ = 12000.0
+GRAD_PREDICT_MAX_MC = 220000.0
+
 EARLY_LIQ_MIGRATION_WINDOW_SECONDS = 240
 EARLY_LIQ_MIGRATION_MIN_DELTA = 8000.0
 EARLY_LIQ_MIGRATION_MIN_RATIO = 1.8
@@ -269,8 +275,9 @@ def ensure_alert_log_file() -> None:
             "timestamp", "alert_type", "mint", "name", "source", "score",
             "market_cap", "liquidity", "first_seen_mc", "max_seen_mc", "age_min",
             "top1_pct", "top3_pct", "migration_flag", "alpha_hits", "x100_hits",
-            "elite_prebuy_hits", "early_liq_migration", "early_buys",
-            "early_unique_buyers", "dev_sold", "tradeability_ok", "risk_ok", "dex_url"
+            "elite_prebuy_hits", "early_liq_migration", "grad_predictor",
+            "early_buys", "early_unique_buyers", "dev_sold", "tradeability_ok",
+            "risk_ok", "dex_url"
         ])
 
 
@@ -314,6 +321,7 @@ def log_alert_csv(
     x100_hits: int,
     elite_prebuy_hits: int,
     early_liq_migration: bool,
+    grad_predictor: bool,
     early_buys: int,
     early_unique_buyers: int,
     dev_sold: bool,
@@ -331,7 +339,8 @@ def log_alert_csv(
                 round(first_seen_mc, 2), round(max_seen_mc, 2), round(age_min, 2),
                 round(top1_pct, 4), round(top3_pct, 4), migration_flag,
                 alpha_hits, x100_hits, elite_prebuy_hits, early_liq_migration,
-                early_buys, early_unique_buyers, dev_sold, tradeability_ok, risk_ok, dex_url
+                grad_predictor, early_buys, early_unique_buyers,
+                dev_sold, tradeability_ok, risk_ok, dex_url
             ])
     except Exception as e:
         print("alert log write error:", e)
@@ -879,7 +888,53 @@ def elite_prebuy_signal(token_state: dict) -> bool:
     return age <= ELITE_PREBUY_WINDOW_SECONDS and elite_hits >= 1 and not token_state.get("migration_flag", False)
 
 
-def pre_migration_x50_signal(token_state: dict) -> bool:
+def pump_fun_graduation_predictor(token_state: dict, pair: dict) -> bool:
+    age = now_ts() - int(token_state.get("launch_seen_ts", token_state.get("first_seen_ts", now_ts())))
+    if age > GRAD_PREDICT_WINDOW_SECONDS:
+        return False
+
+    if token_state.get("migration_flag", False):
+        return False
+
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+
+    if mc <= 0 or liq <= 0:
+        return False
+    if liq < GRAD_PREDICT_MIN_LIQ:
+        return False
+    if mc > GRAD_PREDICT_MAX_MC:
+        return False
+
+    early_buys = int(token_state.get("early_buys", 0))
+    uniq_buyers = len(token_state.get("early_unique_buyers", []))
+    early_vol = to_float(token_state.get("early_volume_est", 0.0), 0.0)
+
+    if early_buys < GRAD_PREDICT_MIN_BUYS:
+        return False
+    if uniq_buyers < GRAD_PREDICT_MIN_UNIQ:
+        return False
+    if early_vol < GRAD_PREDICT_MIN_VOL:
+        return False
+
+    txs = pair.get("txns") or {}
+    m5 = txs.get("m5") or {}
+    buys = int(m5.get("buys", 0))
+    sells = int(m5.get("sells", 0))
+
+    if buys < sells:
+        return False
+    if sniper_trap_risk(token_state):
+        return False
+    if dev_supply_proxy_risk(token_state):
+        return False
+    if token_state.get("dev_sold", False):
+        return False
+
+    return True
+
+
+def pre_migration_x50_signal(token_state: dict, pair: dict) -> bool:
     age = now_ts() - int(token_state.get("launch_seen_ts", token_state.get("first_seen_ts", now_ts())))
     return (
         age <= PREMIGRATION_WINDOW_SECONDS
@@ -887,6 +942,7 @@ def pre_migration_x50_signal(token_state: dict) -> bool:
         and (
             elite_prebuy_signal(token_state)
             or early_liquidity_migration_detector(token_state)
+            or pump_fun_graduation_predictor(token_state, pair)
             or volume_burst_signal(token_state)
             or wallet_cluster_signal(token_state)
             or dev_accumulation_signal(token_state)
@@ -1119,12 +1175,13 @@ def fast_roi_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
         and (
             elite_prebuy_signal(token_state)
             or early_liquidity_migration_detector(token_state)
+            or pump_fun_graduation_predictor(token_state, pair)
             or (
                 len(token_state.get("x100_wallet_hits", [])) >= 1
                 and (volume_burst_signal(token_state) or liquidity_add_signal(token_state))
             )
             or (
-                pre_migration_x50_signal(token_state)
+                pre_migration_x50_signal(token_state, pair)
                 and wallet_cluster_signal(token_state)
             )
         )
@@ -1147,7 +1204,6 @@ def momentum_only_signal(token_state: dict) -> bool:
         and len(token_state.get("x100_wallet_hits", [])) == 0
         and len(token_state.get("elite_prebuy_hits", [])) == 0
         and not dev_accumulation_signal(token_state)
-        and not pre_migration_x50_signal(token_state)
         and not token_state.get("migration_flag", False)
     )
 
@@ -1198,6 +1254,8 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 3
     if early_liquidity_migration_detector(token_state):
         count += 2
+    if pump_fun_graduation_predictor(token_state, pair):
+        count += 2
     if token_state.get("migration_flag", False):
         count += 1
     if holder_stats.get("enabled"):
@@ -1214,7 +1272,7 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
         count += 2
     if dev_accumulation_signal(token_state):
         count += 1
-    if pre_migration_x50_signal(token_state):
+    if pre_migration_x50_signal(token_state, pair):
         count += 2
     if fast_roi_signal(token_state, pair, holder_stats):
         count += 2
@@ -1287,9 +1345,11 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
         score += 3
     if early_liquidity_migration_detector(token_state):
         score += 3
+    if pump_fun_graduation_predictor(token_state, pair):
+        score += 3
     if dev_accumulation_signal(token_state):
         score += 1
-    if pre_migration_x50_signal(token_state):
+    if pre_migration_x50_signal(token_state, pair):
         score += 3
     if elite_prebuy_signal(token_state):
         score += 4
@@ -1347,6 +1407,8 @@ def shortlist_reasons(token_state: dict, pair: dict, holder_stats: dict) -> List
         reasons.append("elite prebuy")
     if early_liquidity_migration_detector(token_state):
         reasons.append("early liquidity migration")
+    if pump_fun_graduation_predictor(token_state, pair):
+        reasons.append("graduation predictor")
     if len(token_state.get("x100_wallet_hits", [])) >= 1:
         reasons.append("x100 wallet")
     if fast_roi_signal(token_state, pair, holder_stats):
@@ -1407,6 +1469,7 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
     return (
         elite_prebuy_signal(token_state)
         or early_liquidity_migration_detector(token_state)
+        or pump_fun_graduation_predictor(token_state, pair)
         or fast_roi_signal(token_state, pair, holder_stats)
         or swing_conviction_signal(token_state, pair, holder_stats)
         or len(token_state.get("x100_wallet_hits", [])) >= 1
@@ -1565,6 +1628,8 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
         reasons.append("elite prebuy")
     if early_liquidity_migration_detector(token_state):
         reasons.append("early liquidity migration")
+    if pump_fun_graduation_predictor(token_state, pair):
+        reasons.append("graduation predictor")
     if len(token_state.get("x100_wallet_hits", [])) >= 1:
         reasons.append("x100 wallet hunter")
     if fast_roi_signal(token_state, pair, holder_stats):
@@ -1747,6 +1812,7 @@ def evaluate_token(mint: str) -> None:
         x100_hits=len(token_state.get("x100_wallet_hits", [])),
         elite_prebuy_hits=len(token_state.get("elite_prebuy_hits", [])),
         early_liq_migration=bool(early_liquidity_migration_detector(token_state)),
+        grad_predictor=bool(pump_fun_graduation_predictor(token_state, pair)),
         early_buys=int(token_state.get("early_buys", 0)),
         early_unique_buyers=len(token_state.get("early_unique_buyers", [])),
         dev_sold=bool(token_state.get("dev_sold", False)),
@@ -1962,7 +2028,7 @@ async def heartbeat_loop():
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — deep_rejected {deep_rejected} — paper open {paper_open} — x100 wallets {learned_x100} — fast+swing+early-liq mode"
+                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — deep_rejected {deep_rejected} — paper open {paper_open} — x100 wallets {learned_x100} — fast+swing+grad mode"
                 )
 
                 STATE["last_heartbeat"] = now
