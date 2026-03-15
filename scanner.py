@@ -10,7 +10,24 @@ import requests
 import websockets
 
 # =========================================================
-# CONFIG
+# DESK-PRO ARCHITECTURE (single file)
+# =========================================================
+# Stage 1  : Raw market ingestion
+# Stage 2  : Discovery filter
+# Stage 3  : Deep conviction scoring
+# Stage 4  : Silent shortlist
+# Stage 5  : GOLD / RED action layer
+#
+# Goal:
+# - conviction bot
+# - x50/x100 candidates
+# - x100 wallet hunter
+# - silent shortlist (no Discord)
+# - no GREEN
+# =========================================================
+
+# =========================================================
+# ENV / CONFIG
 # =========================================================
 
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
@@ -54,17 +71,18 @@ ALERT_COOLDOWN_SECONDS = 8 * 3600
 SHORTLIST_COOLDOWN_SECONDS = 3 * 3600
 
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
-MAX_BUY_ALERTS_PER_WINDOW = 2  # conviction mode => fewer alerts
+MAX_BUY_ALERTS_PER_WINDOW = 2  # conviction mode = rare alerts
 
+# discovery universe
 MAX_DISCOVERY_MC = 5_000_000
-MIN_LIQUIDITY = 1_500
+MIN_LIQUIDITY = 1500
 MIN_LIQ_TO_MC_RATIO = 0.12
 WASH_RATIO_LIMIT = 45.0
 NO_CHASE_MULTIPLIER = 2.5
-MAX_TRACKED_TOKENS = 380
+MAX_TRACKED_TOKENS = 700
 GECKO_MAX_ADD_PER_CYCLE = 120
 
-# conviction mode
+# conviction
 GOLD_SCORE = 8
 SHORTLIST_SCORE = 6
 
@@ -74,7 +92,7 @@ MAX_GOLD_MC = 350_000
 MIN_CONVICTION_MC = 25_000
 MAX_CONVICTION_MC = 400_000
 
-# holder distribution stricter
+# holder concentration
 TOP1_HARD_REJECT = 0.35
 TOP3_HARD_REJECT = 0.65
 TOP1_SOFT_PENALTY = 0.18
@@ -82,15 +100,17 @@ TOP3_SOFT_PENALTY = 0.40
 
 LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead", "renounced"]
 
+# paper mode
 PAPER_GOLD_SIZE_EUR = 50
-PAPER_WINNER_ROI = 2.0
-PAPER_STOP_ROI = -0.35
+PAPER_WINNER_ROI = 2.0      # +200%
+PAPER_STOP_ROI = -0.35      # -35%
 
-# x100 wallet hunter
-WALLET_HUNTER_X100_ROI = 100.0   # true x100
+# x100 hunter
+WALLET_HUNTER_X100_ROI = 100.0
 WALLET_HUNTER_FALLBACK_ROI = 20.0
 WALLET_HUNTER_FALLBACK_WINS = 2
 
+# micro structure
 BURST_WINDOW_SECONDS = 30
 CLUSTER_WINDOW_SECONDS = 60
 PREMIGRATION_WINDOW_SECONDS = 180
@@ -116,7 +136,9 @@ STATE: Dict[str, Any] = {
     "wallet_stats": {},
     "alpha_discovered_wallets": [],
     "x100_discovered_wallets": [],
-    "cycle_seen_tokens": 0,
+    "cycle_raw_seen": 0,
+    "cycle_filtered_out": 0,
+    "cycle_tracked_added": 0,
     "cycle_evaluated_tokens": 0,
 }
 
@@ -174,7 +196,9 @@ def load_state() -> None:
     STATE.setdefault("wallet_stats", {})
     STATE.setdefault("alpha_discovered_wallets", [])
     STATE.setdefault("x100_discovered_wallets", [])
-    STATE.setdefault("cycle_seen_tokens", 0)
+    STATE.setdefault("cycle_raw_seen", 0)
+    STATE.setdefault("cycle_filtered_out", 0)
+    STATE.setdefault("cycle_tracked_added", 0)
     STATE.setdefault("cycle_evaluated_tokens", 0)
 
 
@@ -193,12 +217,9 @@ def cleanup_state() -> None:
 
     keep_alerted = {}
     for key, ts in STATE.get("alerted", {}).items():
-        if key.startswith("SHORTLIST:"):
-            if now - int(ts) < SHORTLIST_COOLDOWN_SECONDS:
-                keep_alerted[key] = ts
-        else:
-            if now - int(ts) < 7 * 24 * 3600:
-                keep_alerted[key] = ts
+        max_age = SHORTLIST_COOLDOWN_SECONDS if key.startswith("SHORTLIST:") else 7 * 24 * 3600
+        if now - int(ts) < max_age:
+            keep_alerted[key] = ts
     STATE["alerted"] = keep_alerted
 
     keep_tokens = {}
@@ -246,7 +267,7 @@ def send_discord(msg: str) -> None:
         print("discord send error:", e)
 
 # =========================================================
-# FILE LOGS
+# FILES
 # =========================================================
 
 def ensure_alert_log_file() -> None:
@@ -493,7 +514,6 @@ def update_wallet_stats_from_winner(wallet: str, roi_multiple: float) -> None:
         alpha.add(wallet)
         STATE["alpha_discovered_wallets"] = list(alpha)
 
-    # true x100 hunter OR practical fallback
     if x100_wins >= 1 or high_roi_wins >= WALLET_HUNTER_FALLBACK_WINS:
         elite = set(STATE.get("x100_discovered_wallets", []))
         elite.add(wallet)
@@ -745,7 +765,7 @@ def extract_amount_usd(msg: dict) -> float:
     return 0.0
 
 # =========================================================
-# TRACKING HELPERS
+# MICROSTRUCTURE
 # =========================================================
 
 def prune_old_events(token_state: dict) -> None:
@@ -1287,7 +1307,7 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
     )
 
 # =========================================================
-# PAPER TRADING
+# PAPER
 # =========================================================
 
 def open_paper_position(mint: str, token_state: dict, pair: dict, alert_type: str) -> None:
@@ -1484,7 +1504,7 @@ def evaluate_token(mint: str) -> None:
     vol = pair.get("volume") or {}
     v5 = to_float(vol.get("m5"), 0.0)
     v1 = to_float(vol.get("h1"), 0.0)
-    vol24 = to_float(vol.get("h24"), 0.0)
+    v24 = to_float(vol.get("h24"), 0.0)
 
     age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
 
@@ -1519,17 +1539,23 @@ def evaluate_token(mint: str) -> None:
     STATE["cycle_evaluated_tokens"] = int(STATE.get("cycle_evaluated_tokens", 0)) + 1
 
     if mc <= 0 or mc > MAX_DISCOVERY_MC:
+        STATE["cycle_filtered_out"] += 1
         return
     if liq < MIN_LIQUIDITY:
+        STATE["cycle_filtered_out"] += 1
         return
     if age_min < 1:
+        STATE["cycle_filtered_out"] += 1
         return
-    if vol24 > 0 and v5 > vol24 * 1.1:
+    if v24 > 0 and v5 > v24 * 1.1:
+        STATE["cycle_filtered_out"] += 1
         return
     if v1 > 0 and v5 > v1 * 2.0:
+        STATE["cycle_filtered_out"] += 1
         return
 
     if token_state.get("source") == "gecko_new_pool" and age_min > 45:
+        STATE["cycle_filtered_out"] += 1
         return
 
     holder_stats = get_holder_stats(mint)
@@ -1556,7 +1582,6 @@ def evaluate_token(mint: str) -> None:
 
     score = compute_score(pair, token_state, holder_stats)
 
-    # shortlists first (no Discord)
     if qualifies_shortlist(pair, token_state, holder_stats, score, hard_red):
         shortlist_key = f"SHORTLIST:{mint}"
         if not recently_alerted(shortlist_key):
@@ -1646,6 +1671,23 @@ async def subscribe_account_trade_once(ws, wallet: str):
     SUBSCRIBED_ACCOUNT_WALLETS.add(wallet)
 
 # =========================================================
+# DISCOVERY FILTER
+# =========================================================
+
+def discovery_accepts_pair(pair: Optional[dict]) -> bool:
+    if not pair:
+        return False
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    if mc <= 0 or mc > MAX_DISCOVERY_MC:
+        return False
+    if liq < MIN_LIQUIDITY:
+        return False
+    if fake_liquidity_risk(mc, liq):
+        return False
+    return True
+
+# =========================================================
 # WEBSOCKET LOOP
 # =========================================================
 
@@ -1673,20 +1715,30 @@ async def websocket_loop():
                     if not payload:
                         continue
 
+                    STATE["cycle_raw_seen"] += 1
+
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
 
                     if mint and ("name" in payload and "symbol" in payload):
-                        rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
-                        rec["launch_seen_ts"] = now_ts()
-                        STATE["cycle_seen_tokens"] = int(STATE.get("cycle_seen_tokens", 0)) + 1
-                        await subscribe_token_trade_once(ws, mint)
+                        pair = get_best_pair(mint)
+                        if discovery_accepts_pair(pair):
+                            rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
+                            rec["launch_seen_ts"] = now_ts()
+                            STATE["cycle_tracked_added"] += 1
+                            await subscribe_token_trade_once(ws, mint)
+                        else:
+                            STATE["cycle_filtered_out"] += 1
 
                     if mint and "migration" in event_text:
-                        rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
-                        rec["migration_flag"] = True
-                        STATE["cycle_seen_tokens"] = int(STATE.get("cycle_seen_tokens", 0)) + 1
-                        await subscribe_token_trade_once(ws, mint)
+                        pair = get_best_pair(mint)
+                        if discovery_accepts_pair(pair):
+                            rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
+                            rec["migration_flag"] = True
+                            STATE["cycle_tracked_added"] += 1
+                            await subscribe_token_trade_once(ws, mint)
+                        else:
+                            STATE["cycle_filtered_out"] += 1
                         continue
 
                     if not mint:
@@ -1726,23 +1778,16 @@ async def gecko_new_pools_loop():
                 if added >= GECKO_MAX_ADD_PER_CYCLE:
                     break
 
+                STATE["cycle_raw_seen"] += 1
+
                 mint = item["mint"]
 
                 if mint in STATE["tokens"]:
                     continue
 
                 pair = get_best_pair(mint)
-                if not pair:
-                    continue
-
-                mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
-                liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
-
-                if mc <= 0 or mc > MAX_DISCOVERY_MC:
-                    continue
-                if liq < MIN_LIQUIDITY:
-                    continue
-                if fake_liquidity_risk(mc, liq):
+                if not discovery_accepts_pair(pair):
+                    STATE["cycle_filtered_out"] += 1
                     continue
 
                 rec = ensure_token(
@@ -1753,7 +1798,7 @@ async def gecko_new_pools_loop():
                 )
                 rec["launch_seen_ts"] = now_ts()
                 added += 1
-                STATE["cycle_seen_tokens"] = int(STATE.get("cycle_seen_tokens", 0)) + 1
+                STATE["cycle_tracked_added"] += 1
 
             dbg("gecko added this cycle:", added)
 
@@ -1790,7 +1835,9 @@ async def heartbeat_loop():
             now = now_ts()
             if now - int(STATE.get("last_heartbeat", 0)) >= HEARTBEAT_INTERVAL_SECONDS:
                 tracked = len(STATE.get("tokens", {}))
-                seen = int(STATE.get("cycle_seen_tokens", 0))
+                raw_seen = int(STATE.get("cycle_raw_seen", 0))
+                filtered_out = int(STATE.get("cycle_filtered_out", 0))
+                tracked_added = int(STATE.get("cycle_tracked_added", 0))
                 evaluated = int(STATE.get("cycle_evaluated_tokens", 0))
                 paper_open = sum(
                     1 for p in STATE.get("paper_positions", {}).values()
@@ -1799,11 +1846,13 @@ async def heartbeat_loop():
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — tracked {tracked} tokens — seen {seen} — evaluated {evaluated} — paper open {paper_open} — x100 wallets {learned_x100} — conviction mode"
+                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — filtered_out {filtered_out} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — paper open {paper_open} — x100 wallets {learned_x100} — conviction desk mode"
                 )
 
                 STATE["last_heartbeat"] = now
-                STATE["cycle_seen_tokens"] = 0
+                STATE["cycle_raw_seen"] = 0
+                STATE["cycle_filtered_out"] = 0
+                STATE["cycle_tracked_added"] = 0
                 STATE["cycle_evaluated_tokens"] = 0
 
         except Exception as e:
