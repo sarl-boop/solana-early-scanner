@@ -57,22 +57,23 @@ SHORTLIST_COOLDOWN_SECONDS = 3 * 3600
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 2
 
+# --- EXTREME MODE X100/X300/X1000 ---
 MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 800
-MIN_LIQ_TO_MC_RATIO = 0.06
+MIN_LIQ_TO_MC_RATIO = 0.12
 WASH_RATIO_LIMIT = 45.0
-NO_CHASE_MULTIPLIER = 2.5
+NO_CHASE_MULTIPLIER = 2.2
 MAX_TRACKED_TOKENS = 700
-GECKO_MAX_ADD_PER_CYCLE = 120
+GECKO_MAX_ADD_PER_CYCLE = 150
 
-GOLD_SCORE = 8
+GOLD_SCORE = 7
 SHORTLIST_SCORE = 6
 
-MIN_GOLD_MC = 12_000
-MAX_GOLD_MC = 350_000
+MIN_GOLD_MC = 8_000
+MAX_GOLD_MC = 250_000
 
-MIN_CONVICTION_MC = 25_000
-MAX_CONVICTION_MC = 400_000
+MIN_CONVICTION_MC = 20_000
+MAX_CONVICTION_MC = 320_000
 
 TOP1_HARD_REJECT = 0.35
 TOP3_HARD_REJECT = 0.65
@@ -106,7 +107,7 @@ GRAD_PREDICT_MIN_BUYS = 8
 GRAD_PREDICT_MIN_UNIQ = 6
 GRAD_PREDICT_MIN_VOL = 1200.0
 GRAD_PREDICT_MIN_LIQ = 12000.0
-GRAD_PREDICT_MAX_MC = 220000.0
+GRAD_PREDICT_MAX_MC = 180000.0
 
 EARLY_LIQ_MIGRATION_WINDOW_SECONDS = 240
 EARLY_LIQ_MIGRATION_MIN_DELTA = 8000.0
@@ -385,12 +386,18 @@ def log_shortlist_csv(
         ensure_shortlist_log_file()
         with SHORTLIST_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            r1 = reasons[0] if len(reasons) > 0 else ""
-            r2 = reasons[1] if len(reasons) > 1 else ""
-            r3 = reasons[2] if len(reasons) > 2 else ""
             writer.writerow([
-                now_ts(), mint, name, score, round(market_cap, 2),
-                round(liquidity, 2), source, r1, r2, r3, dex_url
+                now_ts(),
+                mint,
+                name,
+                score,
+                round(market_cap, 2),
+                round(liquidity, 2),
+                source,
+                reasons[0] if len(reasons) > 0 else "",
+                reasons[1] if len(reasons) > 1 else "",
+                reasons[2] if len(reasons) > 2 else "",
+                dex_url,
             ])
     except Exception as e:
         print("shortlist log write error:", e)
@@ -827,10 +834,8 @@ def liquidity_add_signal(token_state: dict) -> bool:
     if len(hist) < 2:
         return False
 
-    first = hist[0]
-    last = hist[-1]
-    old_liq = to_float(first.get("liq"), 0.0)
-    new_liq = to_float(last.get("liq"), 0.0)
+    old_liq = to_float(hist[0].get("liq"), 0.0)
+    new_liq = to_float(hist[-1].get("liq"), 0.0)
 
     if old_liq <= 0 or new_liq <= 0:
         return False
@@ -852,11 +857,9 @@ def early_liquidity_migration_detector(token_state: dict) -> bool:
     if len(hist) < 2:
         return False
 
-    first = hist[0]
-    last = hist[-1]
+    old_liq = to_float(hist[0].get("liq"), 0.0)
+    new_liq = to_float(hist[-1].get("liq"), 0.0)
 
-    old_liq = to_float(first.get("liq"), 0.0)
-    new_liq = to_float(last.get("liq"), 0.0)
     if old_liq <= 0 or new_liq <= 0:
         return False
 
@@ -1121,7 +1124,7 @@ def cult_meme_proxy_signal(token_state: dict, pair: dict, holder_stats: dict) ->
 
     ratio = liq / mc
     return (
-        25_000 <= mc <= 300_000
+        20_000 <= mc <= 240_000
         and ratio >= 0.40
         and uniq_buyers >= 6
         and age_min <= 30
@@ -1166,7 +1169,7 @@ def fast_roi_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
 
     ratio = liq / mc
     return (
-        12_000 <= mc <= 180_000
+        8_000 <= mc <= 150_000
         and ratio >= 0.30
         and not holder_stats.get("hard_reject", False)
         and not token_state.get("dev_sold", False)
@@ -1303,13 +1306,13 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
 
     score = 0
 
-    if 12_000 <= mc < 30_000:
-        score += 2
-    elif 30_000 <= mc < 80_000:
+    if 8_000 <= mc < 25_000:
         score += 3
-    elif 80_000 <= mc <= 180_000:
+    elif 25_000 <= mc < 60_000:
+        score += 3
+    elif 60_000 <= mc <= 120_000:
         score += 2
-    elif 180_000 < mc <= 350_000:
+    elif 120_000 < mc <= 250_000:
         score += 1
 
     if liq_tier == "strong":
@@ -1535,10 +1538,15 @@ def process_paper_winner(mint: str, current_mc: float) -> None:
     pos["winner_notified"] = True
     name = pos.get("name", mint[:6])
 
-    send_discord(f"🚀 PAPER WINNER | {name}\nROI +{roi*100:.0f}%\nMC {compact_k(entry_mc)} → {compact_k(current_mc)}")
+    send_discord(
+        f"🚀 PAPER WINNER | {name}\n"
+        f"ROI +{roi*100:.0f}%\n"
+        f"MC {compact_k(entry_mc)} → {compact_k(current_mc)}"
+    )
 
     token_state = STATE.get("tokens", {}).get(mint, {})
     roi_multiple = current_mc / entry_mc if entry_mc > 0 else 0.0
+
     for wallet in token_state.get("first_buy_wallets", []):
         update_wallet_stats_from_winner(wallet, roi_multiple)
 
@@ -1572,7 +1580,11 @@ def process_paper_stop(mint: str, current_mc: float) -> None:
     pos["stop_notified"] = True
     name = pos.get("name", mint[:6])
 
-    send_discord(f"⚠️ PAPER STOP | {name}\nROI {roi*100:.0f}%\nMC {compact_k(entry_mc)} → {compact_k(current_mc)}")
+    send_discord(
+        f"⚠️ PAPER STOP | {name}\n"
+        f"ROI {roi*100:.0f}%\n"
+        f"MC {compact_k(entry_mc)} → {compact_k(current_mc)}"
+    )
 
     log_paper_csv(
         event="STOP",
@@ -1605,7 +1617,6 @@ async def paper_positions_loop():
 
                 process_paper_winner(mint, current_mc)
                 process_paper_stop(mint, current_mc)
-
         except Exception as e:
             print("paper loop error:", e)
 
@@ -1959,7 +1970,6 @@ async def gecko_new_pools_loop():
                     break
 
                 STATE["cycle_raw_seen"] += 1
-
                 mint = item["mint"]
 
                 if mint in STATE["tokens"]:
@@ -2028,7 +2038,10 @@ async def heartbeat_loop():
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
 
                 send_discord(
-                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — deep_rejected {deep_rejected} — paper open {paper_open} — x100 wallets {learned_x100} — fast+swing+grad mode"
+                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
+                    f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
+                    f"deep_rejected {deep_rejected} — paper open {paper_open} — "
+                    f"x100 wallets {learned_x100} — extreme x100 mode"
                 )
 
                 STATE["last_heartbeat"] = now
