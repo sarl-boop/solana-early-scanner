@@ -6,6 +6,10 @@
   "paper_positions": {},
   "wallet_stats": {},
   "alpha_discovered_wallets": [],
-  "cycle_seen_tokens": 0,
-  "cycle_evaluated_tokens": 0
+  "x100_discovered_wallets": [],
+  "cycle_raw_seen": 0,
+  "cycle_discovery_rejected": 0,
+  "cycle_tracked_added": 0,
+  "cycle_evaluated_tokens": 0,
+  "cycle_deep_rejected": 0
 }
