@@ -1,4 +1,4 @@
-name: Solana Sniper Scanner
+name: Solana Sniper Scanner Extreme
 
 on:
   workflow_dispatch:
