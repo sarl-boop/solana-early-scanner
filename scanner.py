@@ -59,7 +59,7 @@ SHORTLIST_COOLDOWN_SECONDS = 3 * 3600
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
 MAX_BUY_ALERTS_PER_WINDOW = 2
 
-# extreme mode
+# extreme mode / quality mode
 MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 800
 MIN_LIQ_TO_MC_RATIO = 0.18
@@ -1204,6 +1204,54 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     return count
 
 
+def safe_token_filter(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    uniq_buyers = len(token_state.get("early_unique_buyers", []))
+
+    return (
+        liq >= 15_000
+        and mc >= 10_000
+        and uniq_buyers >= 5
+        and not token_state.get("dev_sold", False)
+        and not token_state.get("lp_risk", False)
+        and not holder_stats.get("hard_reject", False)
+        and token_state.get("tradeability_ok", True)
+        and token_state.get("risk_ok", True)
+    )
+
+
+def confirmation_signal(token_state: dict, pair: dict, holder_stats: dict) -> bool:
+    signals = 0
+
+    if alpha_wallet_cluster_signal(token_state):
+        signals += 2
+    if watchers_velocity_signal(token_state):
+        signals += 1
+    if liquidity_add_signal(token_state):
+        signals += 1
+    if early_liquidity_migration_detector(token_state):
+        signals += 2
+    if pump_fun_graduation_predictor(token_state, pair):
+        signals += 2
+    if len(token_state.get("x100_wallet_hits", [])) >= 1:
+        signals += 2
+    if volume_burst_signal(token_state):
+        signals += 1
+    if wallet_cluster_signal(token_state):
+        signals += 1
+    if creator_reputation_signal(token_state):
+        signals += 2
+    if elite_prebuy_signal(token_state):
+        signals += 2
+    if fast_roi_signal(token_state, pair, holder_stats):
+        signals += 1
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        signals += 1
+
+    return signals >= 3
+
+
 def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
@@ -1445,6 +1493,10 @@ def shortlist_reasons(token_state: dict, pair: dict, holder_stats: dict) -> List
         reasons.append("fast roi")
     if swing_conviction_signal(token_state, pair, holder_stats):
         reasons.append("swing conviction")
+    if confirmation_signal(token_state, pair, holder_stats):
+        reasons.append("confirmed")
+    if safe_token_filter(token_state, pair, holder_stats):
+        reasons.append("safe structure")
     if not reasons:
         reasons.append("near-threshold")
     return reasons[:3]
@@ -1460,6 +1512,8 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
     reasons = shortlist_reasons(token_state, pair, holder_stats)
     color = "🔴 RED" if alert_type == "RED" else "🟡 GOLD"
     action = "Sell" if alert_type == "RED" else "Buy 25€ or 50€"
+    safe = safe_token_filter(token_state, pair, holder_stats)
+    confirmed = confirmation_signal(token_state, pair, holder_stats)
 
     return (
         f"{name}\n"
@@ -1467,6 +1521,8 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
         f"Color: {color}\n"
         f"Market cap: ${compact_k(mc)}\n"
         f"Liquidity: ${compact_k(liq)}\n"
+        f"Safe: {'YES' if safe else 'NO'}\n"
+        f"Confirmed: {'YES' if confirmed else 'NO'}\n"
         f"Reason: {', '.join(reasons)}\n"
         f"Action: {action}\n"
         f"Dex: <{pair_url}>"
@@ -1475,7 +1531,8 @@ def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, a
 
 def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
-    liq_tier = liquidity_quality_tier(mc, to_float((pair.get("liquidity") or {}).get("usd"), 0.0))
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    liq_tier = liquidity_quality_tier(mc, liq)
 
     if hard_red:
         return "RED" if token_state["mint"] in HELD_TOKENS else "IGNORE"
@@ -1491,6 +1548,8 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
         has_real_action_signal(token_state, pair, holder_stats)
         and live_confirmation_count(pair, token_state, holder_stats) >= 5
         and score >= GOLD_SCORE
+        and safe_token_filter(token_state, pair, holder_stats)
+        and confirmation_signal(token_state, pair, holder_stats)
     ):
         return "GOLD"
 
@@ -1525,6 +1584,7 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
         or swing_conviction_signal(token_state, pair, holder_stats)
         or len(token_state.get("x100_wallet_hits", [])) >= 1
         or cult_meme_proxy_signal(token_state, pair, holder_stats)
+        or confirmation_signal(token_state, pair, holder_stats)
     )
 
 
@@ -1898,7 +1958,7 @@ async def heartbeat_loop():
                     f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                     f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
                     f"deep_rejected {deep_rejected} — paper open {paper_open} — "
-                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — extreme x100 mode"
+                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — quality early mode"
                 )
 
                 STATE["last_heartbeat"] = now
