@@ -1,3 +1,4 @@
+
 import asyncio
 import csv
 import json
@@ -374,8 +375,6 @@ def ensure_token(mint: str, name: str = "", symbol: str = "", source: str = "unk
         "liq_history": [],
         "alpha_hit_events": [],
         "watchers_history": [],
-        "wallet_learning_marked_20x": False,
-        "wallet_learning_marked_100x": False,
     }
     STATE["tokens"][mint] = rec
     return rec
@@ -469,27 +468,6 @@ def update_wallet_stats_from_winner(wallet: str, roi_multiple: float) -> None:
         elite = set(STATE.get("x100_discovered_wallets", []))
         elite.add(wallet)
         STATE["x100_discovered_wallets"] = list(elite)
-
-
-def update_wallet_learning_from_token_performance(token_state: dict, current_mc: float) -> None:
-    entry = to_float(token_state.get("first_seen_mc", 0.0), 0.0)
-    if entry <= 0 or current_mc <= 0:
-        return
-
-    roi_multiple = current_mc / entry
-    wallets = token_state.get("first_buy_wallets", [])[:8]
-    if not wallets:
-        return
-
-    if roi_multiple >= WALLET_HUNTER_FALLBACK_ROI and not token_state.get("wallet_learning_marked_20x", False):
-        for wallet in wallets:
-            update_wallet_stats_from_winner(wallet, roi_multiple)
-        token_state["wallet_learning_marked_20x"] = True
-
-    if roi_multiple >= WALLET_HUNTER_X100_ROI and not token_state.get("wallet_learning_marked_100x", False):
-        for wallet in wallets:
-            update_wallet_stats_from_winner(wallet, roi_multiple)
-        token_state["wallet_learning_marked_100x"] = True
 
 
 def update_dev_wallet_reputation(token_state: dict, current_mc: float) -> None:
@@ -1600,10 +1578,7 @@ def evaluate_token(mint: str) -> None:
         token_state["first_seen_mc"] = mc
     token_state["max_seen_mc"] = max(token_state.get("max_seen_mc", 0.0), mc)
 
-    # Petite amélioration utile : apprentissage wallets même sans paper winner
-    update_wallet_learning_from_token_performance(token_state, mc)
     update_dev_wallet_reputation(token_state, mc)
-
     STATE["cycle_evaluated_tokens"] = int(STATE.get("cycle_evaluated_tokens", 0)) + 1
 
     if mc <= 0 or mc > MAX_DISCOVERY_MC:
@@ -1924,7 +1899,7 @@ async def heartbeat_loop():
                     f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                     f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
                     f"deep_rejected {deep_rejected} — paper open {paper_open} — "
-                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — base restored mode"
+                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — extreme x100 mode"
                 )
 
                 STATE["last_heartbeat"] = now
