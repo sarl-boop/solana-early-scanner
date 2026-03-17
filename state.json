@@ -1,16 +1,1423 @@
 {
-  "tokens": {},
+  "tokens": {
+    "CwEyRuJwishTH4W5rrzjKH5yxb78y8axDzBAee1upump": {
+      "mint": "CwEyRuJwishTH4W5rrzjKH5yxb78y8axDzBAee1upump",
+      "name": "Agent Crime",
+      "symbol": "CRIME",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777489,
+      "launch_seen_ts": 1773777489,
+      "last_seen_ts": 1773777678,
+      "first_seen_mc": 32505.0,
+      "max_seen_mc": 32505.0,
+      "last_pair_url": "https://dexscreener.com/solana/2p39ttg9h6pctrjvkbmerqs8zg1gpchivyaedayzajqd",
+      "last_liquidity_usd": 10264.52,
+      "last_liq_change_ts": 1773777678,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777491,
+          "liq": 14718.98
+        },
+        {
+          "ts": 1773777519,
+          "liq": 14441.06
+        },
+        {
+          "ts": 1773777560,
+          "liq": 12542.98
+        },
+        {
+          "ts": 1773777589,
+          "liq": 12183.92
+        },
+        {
+          "ts": 1773777618,
+          "liq": 11050.85
+        },
+        {
+          "ts": 1773777649,
+          "liq": 11673.27
+        },
+        {
+          "ts": 1773777678,
+          "liq": 10264.52
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777505,
+          "value": 0
+        },
+        {
+          "ts": 1773777519,
+          "value": 0
+        },
+        {
+          "ts": 1773777533,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777560,
+          "value": 0
+        },
+        {
+          "ts": 1773777575,
+          "value": 0
+        },
+        {
+          "ts": 1773777589,
+          "value": 0
+        },
+        {
+          "ts": 1773777602,
+          "value": 0
+        },
+        {
+          "ts": 1773777618,
+          "value": 0
+        },
+        {
+          "ts": 1773777633,
+          "value": 0
+        },
+        {
+          "ts": 1773777649,
+          "value": 0
+        },
+        {
+          "ts": 1773777662,
+          "value": 0
+        },
+        {
+          "ts": 1773777678,
+          "value": 0
+        }
+      ]
+    },
+    "BpAQH2qrcatUQX2tZPtB6TSmPkPRK8LWzCbwh89TPftr": {
+      "mint": "BpAQH2qrcatUQX2tZPtB6TSmPkPRK8LWzCbwh89TPftr",
+      "name": "kobe Bryant",
+      "symbol": "科比",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777321,
+      "launch_seen_ts": 1773777321,
+      "last_seen_ts": 1773777678,
+      "first_seen_mc": 30167.0,
+      "max_seen_mc": 30167.0,
+      "last_pair_url": "https://dexscreener.com/solana/f1qhjdkl4lqftm8bzw9otgzpajyhtdgr4eqfx3dqw7wa",
+      "last_liquidity_usd": 30833.96,
+      "last_liq_change_ts": 1773777649,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777408,
+          "liq": 28962.07
+        },
+        {
+          "ts": 1773777435,
+          "liq": 29086.08
+        },
+        {
+          "ts": 1773777476,
+          "liq": 29458.17
+        },
+        {
+          "ts": 1773777505,
+          "liq": 29655.88
+        },
+        {
+          "ts": 1773777546,
+          "liq": 29380.22
+        },
+        {
+          "ts": 1773777574,
+          "liq": 29952.41
+        },
+        {
+          "ts": 1773777618,
+          "liq": 30665.22
+        },
+        {
+          "ts": 1773777649,
+          "liq": 30833.96
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777327,
+          "value": 0
+        },
+        {
+          "ts": 1773777341,
+          "value": 0
+        },
+        {
+          "ts": 1773777355,
+          "value": 0
+        },
+        {
+          "ts": 1773777367,
+          "value": 0
+        },
+        {
+          "ts": 1773777381,
+          "value": 0
+        },
+        {
+          "ts": 1773777394,
+          "value": 0
+        },
+        {
+          "ts": 1773777408,
+          "value": 0
+        },
+        {
+          "ts": 1773777421,
+          "value": 0
+        },
+        {
+          "ts": 1773777435,
+          "value": 0
+        },
+        {
+          "ts": 1773777449,
+          "value": 0
+        },
+        {
+          "ts": 1773777463,
+          "value": 0
+        },
+        {
+          "ts": 1773777476,
+          "value": 0
+        },
+        {
+          "ts": 1773777492,
+          "value": 0
+        },
+        {
+          "ts": 1773777505,
+          "value": 0
+        },
+        {
+          "ts": 1773777519,
+          "value": 0
+        },
+        {
+          "ts": 1773777533,
+          "value": 0
+        },
+        {
+          "ts": 1773777546,
+          "value": 0
+        },
+        {
+          "ts": 1773777562,
+          "value": 0
+        },
+        {
+          "ts": 1773777574,
+          "value": 0
+        },
+        {
+          "ts": 1773777589,
+          "value": 0
+        },
+        {
+          "ts": 1773777602,
+          "value": 0
+        },
+        {
+          "ts": 1773777618,
+          "value": 0
+        },
+        {
+          "ts": 1773777633,
+          "value": 0
+        },
+        {
+          "ts": 1773777649,
+          "value": 0
+        },
+        {
+          "ts": 1773777662,
+          "value": 0
+        },
+        {
+          "ts": 1773777678,
+          "value": 0
+        }
+      ]
+    },
+    "EKX864bHQsz2FW51eYk6fqNgTqrwX6TuPxKfSN2ppump": {
+      "mint": "EKX864bHQsz2FW51eYk6fqNgTqrwX6TuPxKfSN2ppump",
+      "name": "Orbital Data Ai",
+      "symbol": "Orbdai",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777490,
+      "launch_seen_ts": 1773777490,
+      "last_seen_ts": 1773777678,
+      "first_seen_mc": 7839.0,
+      "max_seen_mc": 11099.0,
+      "last_pair_url": "https://dexscreener.com/solana/4mpgpgecyrxnbv8fjygkvhw86xeqthhpickgw99gxzbk",
+      "last_liquidity_usd": 15182.97,
+      "last_liq_change_ts": 1773777649,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777491,
+          "liq": 12756.76
+        },
+        {
+          "ts": 1773777505,
+          "liq": 13945.51
+        },
+        {
+          "ts": 1773777547,
+          "liq": 15096.27
+        },
+        {
+          "ts": 1773777560,
+          "liq": 13945.51
+        },
+        {
+          "ts": 1773777575,
+          "liq": 15096.27
+        },
+        {
+          "ts": 1773777588,
+          "liq": 15173.51
+        },
+        {
+          "ts": 1773777649,
+          "liq": 15182.97
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777505,
+          "value": 0
+        },
+        {
+          "ts": 1773777519,
+          "value": 0
+        },
+        {
+          "ts": 1773777533,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777560,
+          "value": 0
+        },
+        {
+          "ts": 1773777575,
+          "value": 0
+        },
+        {
+          "ts": 1773777588,
+          "value": 0
+        },
+        {
+          "ts": 1773777604,
+          "value": 0
+        },
+        {
+          "ts": 1773777617,
+          "value": 0
+        },
+        {
+          "ts": 1773777633,
+          "value": 0
+        },
+        {
+          "ts": 1773777649,
+          "value": 0
+        },
+        {
+          "ts": 1773777662,
+          "value": 0
+        },
+        {
+          "ts": 1773777678,
+          "value": 0
+        }
+      ]
+    },
+    "4yahNnAMCWNGw5eAdT5HYe2iUJkhUvUJtGxgZhkT2RPX": {
+      "mint": "4yahNnAMCWNGw5eAdT5HYe2iUJkhUvUJtGxgZhkT2RPX",
+      "name": "Oil War",
+      "symbol": "OWAR",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777264,
+      "launch_seen_ts": 1773777264,
+      "last_seen_ts": 1773777677,
+      "first_seen_mc": 22518.0,
+      "max_seen_mc": 42899.0,
+      "last_pair_url": "https://dexscreener.com/solana/8xcujtvsef4b8nkscmzmzhgpdb5kru1vxyn39fzbpyyq",
+      "last_liquidity_usd": 58442.61,
+      "last_liq_change_ts": 1773777648,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777395,
+          "liq": 51629.36
+        },
+        {
+          "ts": 1773777435,
+          "liq": 52030.03
+        },
+        {
+          "ts": 1773777476,
+          "liq": 51811.23
+        },
+        {
+          "ts": 1773777504,
+          "liq": 53366.38
+        },
+        {
+          "ts": 1773777532,
+          "liq": 56013.1
+        },
+        {
+          "ts": 1773777574,
+          "liq": 57395.97
+        },
+        {
+          "ts": 1773777617,
+          "liq": 56291.07
+        },
+        {
+          "ts": 1773777648,
+          "liq": 58442.61
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777276,
+          "value": 0
+        },
+        {
+          "ts": 1773777289,
+          "value": 0
+        },
+        {
+          "ts": 1773777301,
+          "value": 0
+        },
+        {
+          "ts": 1773777314,
+          "value": 0
+        },
+        {
+          "ts": 1773777327,
+          "value": 0
+        },
+        {
+          "ts": 1773777342,
+          "value": 0
+        },
+        {
+          "ts": 1773777354,
+          "value": 0
+        },
+        {
+          "ts": 1773777368,
+          "value": 0
+        },
+        {
+          "ts": 1773777380,
+          "value": 0
+        },
+        {
+          "ts": 1773777395,
+          "value": 0
+        },
+        {
+          "ts": 1773777407,
+          "value": 0
+        },
+        {
+          "ts": 1773777422,
+          "value": 0
+        },
+        {
+          "ts": 1773777435,
+          "value": 0
+        },
+        {
+          "ts": 1773777449,
+          "value": 0
+        },
+        {
+          "ts": 1773777463,
+          "value": 0
+        },
+        {
+          "ts": 1773777476,
+          "value": 0
+        },
+        {
+          "ts": 1773777492,
+          "value": 0
+        },
+        {
+          "ts": 1773777504,
+          "value": 0
+        },
+        {
+          "ts": 1773777520,
+          "value": 0
+        },
+        {
+          "ts": 1773777532,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777561,
+          "value": 0
+        },
+        {
+          "ts": 1773777574,
+          "value": 0
+        },
+        {
+          "ts": 1773777589,
+          "value": 0
+        },
+        {
+          "ts": 1773777603,
+          "value": 0
+        },
+        {
+          "ts": 1773777617,
+          "value": 0
+        },
+        {
+          "ts": 1773777634,
+          "value": 0
+        },
+        {
+          "ts": 1773777648,
+          "value": 0
+        },
+        {
+          "ts": 1773777663,
+          "value": 0
+        },
+        {
+          "ts": 1773777677,
+          "value": 0
+        }
+      ]
+    },
+    "E565yJD443cerqd5LYcdDxPRSmvGthrb7PomR2s8Fgx9": {
+      "mint": "E565yJD443cerqd5LYcdDxPRSmvGthrb7PomR2s8Fgx9",
+      "name": "PUNCHLABUBU",
+      "symbol": "PLAB",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777631,
+      "launch_seen_ts": 1773777631,
+      "last_seen_ts": 1773777677,
+      "first_seen_mc": 8513.0,
+      "max_seen_mc": 8990.0,
+      "last_pair_url": "https://dexscreener.com/solana/cfu8hyw9mnorl16txbrewn53kuwipzyfpmmyg5w3ontj",
+      "last_liquidity_usd": 17019.3,
+      "last_liq_change_ts": 1773777663,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777633,
+          "liq": 16556.31
+        },
+        {
+          "ts": 1773777663,
+          "liq": 17019.3
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777633,
+          "value": 0
+        },
+        {
+          "ts": 1773777648,
+          "value": 0
+        },
+        {
+          "ts": 1773777663,
+          "value": 0
+        },
+        {
+          "ts": 1773777677,
+          "value": 0
+        }
+      ]
+    },
+    "F7B9NrFTdZEg3DreWVBrUcRaVAEmAPWTCDNzbWrWw1G1": {
+      "mint": "F7B9NrFTdZEg3DreWVBrUcRaVAEmAPWTCDNzbWrWw1G1",
+      "name": "UGOROfficial✨",
+      "symbol": "UGOR",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777407,
+      "launch_seen_ts": 1773777407,
+      "last_seen_ts": 1773777677,
+      "first_seen_mc": 146630.0,
+      "max_seen_mc": 268307.0,
+      "last_pair_url": "https://dexscreener.com/solana/ecq3s28jg8yncv8dosvqbbhy9r4ppj8qfc4cfygh1day",
+      "last_liquidity_usd": 268743.09,
+      "last_liq_change_ts": 1773777663,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777407,
+          "liq": 147581.62
+        },
+        {
+          "ts": 1773777448,
+          "liq": 169464.69
+        },
+        {
+          "ts": 1773777491,
+          "liq": 193181.47
+        },
+        {
+          "ts": 1773777533,
+          "liq": 207942.96
+        },
+        {
+          "ts": 1773777576,
+          "liq": 232868.32
+        },
+        {
+          "ts": 1773777617,
+          "liq": 243200.6
+        },
+        {
+          "ts": 1773777663,
+          "liq": 268743.09
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777407,
+          "value": 0
+        },
+        {
+          "ts": 1773777421,
+          "value": 0
+        },
+        {
+          "ts": 1773777436,
+          "value": 0
+        },
+        {
+          "ts": 1773777448,
+          "value": 0
+        },
+        {
+          "ts": 1773777463,
+          "value": 0
+        },
+        {
+          "ts": 1773777477,
+          "value": 0
+        },
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777506,
+          "value": 0
+        },
+        {
+          "ts": 1773777518,
+          "value": 0
+        },
+        {
+          "ts": 1773777533,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777560,
+          "value": 0
+        },
+        {
+          "ts": 1773777576,
+          "value": 0
+        },
+        {
+          "ts": 1773777588,
+          "value": 0
+        },
+        {
+          "ts": 1773777603,
+          "value": 0
+        },
+        {
+          "ts": 1773777617,
+          "value": 0
+        },
+        {
+          "ts": 1773777635,
+          "value": 0
+        },
+        {
+          "ts": 1773777647,
+          "value": 0
+        },
+        {
+          "ts": 1773777663,
+          "value": 0
+        },
+        {
+          "ts": 1773777677,
+          "value": 0
+        }
+      ]
+    },
+    "8fJV8jNCe2Gzq8MgnKuXKNRpKnPrYH7nKhGPd27RP3Xt": {
+      "mint": "8fJV8jNCe2Gzq8MgnKuXKNRpKnPrYH7nKhGPd27RP3Xt",
+      "name": "MINDLESS COIN",
+      "symbol": "MINDLESS",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777627,
+      "launch_seen_ts": 1773777627,
+      "last_seen_ts": 1773777677,
+      "first_seen_mc": 8587.0,
+      "max_seen_mc": 8719.0,
+      "last_pair_url": "https://dexscreener.com/solana/eo2rfre9b6grcdca3kfdbajbhkcb6ly2jwzmgdyrvfwf",
+      "last_liquidity_usd": 16757.47,
+      "last_liq_change_ts": 1773777677,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777633,
+          "liq": 16627.35
+        },
+        {
+          "ts": 1773777677,
+          "liq": 16757.47
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777633,
+          "value": 0
+        },
+        {
+          "ts": 1773777649,
+          "value": 0
+        },
+        {
+          "ts": 1773777662,
+          "value": 0
+        },
+        {
+          "ts": 1773777677,
+          "value": 0
+        }
+      ]
+    },
+    "HpQjx7GzxvbBGXVaFdGnhL2t2PG2rH87ownCGyrfZ2hb": {
+      "mint": "HpQjx7GzxvbBGXVaFdGnhL2t2PG2rH87ownCGyrfZ2hb",
+      "name": "Doodle Me",
+      "symbol": "Doodle",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777181,
+      "launch_seen_ts": 1773777181,
+      "last_seen_ts": 1773777676,
+      "first_seen_mc": 12743.0,
+      "max_seen_mc": 15974.0,
+      "last_pair_url": "https://dexscreener.com/solana/8xwne3f9bqomhgbsejnpgfqbsw7g3a3tpwpyss7bubqb",
+      "last_liquidity_usd": 26290.97,
+      "last_liq_change_ts": 1773777676,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777381,
+          "liq": 24840.62
+        },
+        {
+          "ts": 1773777408,
+          "liq": 24943.96
+        },
+        {
+          "ts": 1773777448,
+          "liq": 24885.71
+        },
+        {
+          "ts": 1773777491,
+          "liq": 25635.61
+        },
+        {
+          "ts": 1773777519,
+          "liq": 25285.95
+        },
+        {
+          "ts": 1773777561,
+          "liq": 25718.52
+        },
+        {
+          "ts": 1773777604,
+          "liq": 26068.43
+        },
+        {
+          "ts": 1773777635,
+          "liq": 25749.18
+        },
+        {
+          "ts": 1773777676,
+          "liq": 26290.97
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777188,
+          "value": 0
+        },
+        {
+          "ts": 1773777200,
+          "value": 0
+        },
+        {
+          "ts": 1773777212,
+          "value": 0
+        },
+        {
+          "ts": 1773777225,
+          "value": 0
+        },
+        {
+          "ts": 1773777238,
+          "value": 0
+        },
+        {
+          "ts": 1773777251,
+          "value": 0
+        },
+        {
+          "ts": 1773777263,
+          "value": 0
+        },
+        {
+          "ts": 1773777276,
+          "value": 0
+        },
+        {
+          "ts": 1773777289,
+          "value": 0
+        },
+        {
+          "ts": 1773777301,
+          "value": 0
+        },
+        {
+          "ts": 1773777314,
+          "value": 0
+        },
+        {
+          "ts": 1773777328,
+          "value": 0
+        },
+        {
+          "ts": 1773777341,
+          "value": 0
+        },
+        {
+          "ts": 1773777354,
+          "value": 0
+        },
+        {
+          "ts": 1773777368,
+          "value": 0
+        },
+        {
+          "ts": 1773777381,
+          "value": 0
+        },
+        {
+          "ts": 1773777394,
+          "value": 0
+        },
+        {
+          "ts": 1773777408,
+          "value": 0
+        },
+        {
+          "ts": 1773777420,
+          "value": 0
+        },
+        {
+          "ts": 1773777436,
+          "value": 0
+        },
+        {
+          "ts": 1773777448,
+          "value": 0
+        },
+        {
+          "ts": 1773777463,
+          "value": 0
+        },
+        {
+          "ts": 1773777477,
+          "value": 0
+        },
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777506,
+          "value": 0
+        },
+        {
+          "ts": 1773777519,
+          "value": 0
+        },
+        {
+          "ts": 1773777533,
+          "value": 0
+        },
+        {
+          "ts": 1773777546,
+          "value": 0
+        },
+        {
+          "ts": 1773777561,
+          "value": 0
+        },
+        {
+          "ts": 1773777575,
+          "value": 0
+        },
+        {
+          "ts": 1773777588,
+          "value": 0
+        },
+        {
+          "ts": 1773777604,
+          "value": 0
+        },
+        {
+          "ts": 1773777616,
+          "value": 0
+        },
+        {
+          "ts": 1773777635,
+          "value": 0
+        },
+        {
+          "ts": 1773777647,
+          "value": 0
+        },
+        {
+          "ts": 1773777664,
+          "value": 0
+        },
+        {
+          "ts": 1773777676,
+          "value": 0
+        }
+      ]
+    },
+    "3eJ4AvCAtcjD3ZzyZ5H9Ud2BAbJLdM6NfvkGGWvnhJim": {
+      "mint": "3eJ4AvCAtcjD3ZzyZ5H9Ud2BAbJLdM6NfvkGGWvnhJim",
+      "name": "TRUMP OIL",
+      "symbol": "USAOIL",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777488,
+      "launch_seen_ts": 1773777488,
+      "last_seen_ts": 1773777676,
+      "first_seen_mc": 95545.0,
+      "max_seen_mc": 19202471.0,
+      "last_pair_url": "https://dexscreener.com/solana/9s7nyjx4z7t6pn2afkywe46k56mybpgqilqczkgxfqap",
+      "last_liquidity_usd": 0.02,
+      "last_liq_change_ts": 1773777520,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777491,
+          "liq": 13455.35
+        },
+        {
+          "ts": 1773777520,
+          "liq": 0.02
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777505,
+          "value": 0
+        },
+        {
+          "ts": 1773777520,
+          "value": 0
+        },
+        {
+          "ts": 1773777532,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777561,
+          "value": 0
+        },
+        {
+          "ts": 1773777574,
+          "value": 0
+        },
+        {
+          "ts": 1773777589,
+          "value": 0
+        },
+        {
+          "ts": 1773777603,
+          "value": 0
+        },
+        {
+          "ts": 1773777617,
+          "value": 0
+        },
+        {
+          "ts": 1773777634,
+          "value": 0
+        },
+        {
+          "ts": 1773777648,
+          "value": 0
+        },
+        {
+          "ts": 1773777663,
+          "value": 0
+        },
+        {
+          "ts": 1773777676,
+          "value": 0
+        }
+      ]
+    },
+    "3iayeXFPxE5b4X6CU36Sopu5qpWNrjA8yFAawn7gkXci": {
+      "mint": "3iayeXFPxE5b4X6CU36Sopu5qpWNrjA8yFAawn7gkXci",
+      "name": "UGOROfficial✨",
+      "symbol": "UGOR",
+      "source": "gecko_new_pool",
+      "first_seen_ts": 1773777266,
+      "launch_seen_ts": 1773777266,
+      "last_seen_ts": 1773777676,
+      "first_seen_mc": 24420.0,
+      "max_seen_mc": 26141.0,
+      "last_pair_url": "https://dexscreener.com/solana/eyijkt9zmiawwjetknfrxriqc8q5q4spdb1g89nhukuz",
+      "last_liquidity_usd": 0.09,
+      "last_liq_change_ts": 1773777520,
+      "smart_wallet_hits": [],
+      "x100_wallet_hits": [],
+      "elite_prebuy_hits": [],
+      "buy_wallet_counts": {},
+      "sell_wallet_counts": {},
+      "first_buy_wallets": [],
+      "first_buy_ts": 0,
+      "candidate_dev_wallet": null,
+      "dev_sold": false,
+      "tradeability_ok": true,
+      "risk_ok": true,
+      "lp_safe": false,
+      "lp_risk": false,
+      "liq_lock_hint": false,
+      "migration_flag": false,
+      "early_buys": 0,
+      "early_sells": 0,
+      "early_unique_buyers": [],
+      "early_unique_sellers": [],
+      "early_volume_est": 0.0,
+      "buy_events": [],
+      "sell_events": [],
+      "liq_history": [
+        {
+          "ts": 1773777408,
+          "liq": 49642.8
+        },
+        {
+          "ts": 1773777435,
+          "liq": 49886.5
+        },
+        {
+          "ts": 1773777477,
+          "liq": 50203.88
+        },
+        {
+          "ts": 1773777520,
+          "liq": 0.09
+        }
+      ],
+      "alpha_hit_events": [],
+      "watchers_history": [
+        {
+          "ts": 1773777276,
+          "value": 0
+        },
+        {
+          "ts": 1773777288,
+          "value": 0
+        },
+        {
+          "ts": 1773777302,
+          "value": 0
+        },
+        {
+          "ts": 1773777314,
+          "value": 0
+        },
+        {
+          "ts": 1773777327,
+          "value": 0
+        },
+        {
+          "ts": 1773777341,
+          "value": 0
+        },
+        {
+          "ts": 1773777355,
+          "value": 0
+        },
+        {
+          "ts": 1773777367,
+          "value": 0
+        },
+        {
+          "ts": 1773777381,
+          "value": 0
+        },
+        {
+          "ts": 1773777394,
+          "value": 0
+        },
+        {
+          "ts": 1773777408,
+          "value": 0
+        },
+        {
+          "ts": 1773777421,
+          "value": 0
+        },
+        {
+          "ts": 1773777435,
+          "value": 0
+        },
+        {
+          "ts": 1773777449,
+          "value": 0
+        },
+        {
+          "ts": 1773777463,
+          "value": 0
+        },
+        {
+          "ts": 1773777477,
+          "value": 0
+        },
+        {
+          "ts": 1773777491,
+          "value": 0
+        },
+        {
+          "ts": 1773777505,
+          "value": 0
+        },
+        {
+          "ts": 1773777520,
+          "value": 0
+        },
+        {
+          "ts": 1773777532,
+          "value": 0
+        },
+        {
+          "ts": 1773777547,
+          "value": 0
+        },
+        {
+          "ts": 1773777561,
+          "value": 0
+        },
+        {
+          "ts": 1773777574,
+          "value": 0
+        },
+        {
+          "ts": 1773777589,
+          "value": 0
+        },
+        {
+          "ts": 1773777603,
+          "value": 0
+        },
+        {
+          "ts": 1773777617,
+          "value": 0
+        },
+        {
+          "ts": 1773777634,
+          "value": 0
+        },
+        {
+          "ts": 1773777648,
+          "value": 0
+        },
+        {
+          "ts": 1773777663,
+          "value": 0
+        },
+        {
+          "ts": 1773777676,
+          "value": 0
+        }
+      ]
+    }
+  },
   "alerted": {},
-  "last_heartbeat": 0,
+  "last_heartbeat": 1773777044,
   "buy_alert_history": [],
   "paper_positions": {},
   "wallet_stats": {},
   "dev_wallet_stats": {},
   "alpha_discovered_wallets": [],
   "x100_discovered_wallets": [],
-  "cycle_raw_seen": 0,
-  "cycle_discovery_rejected": 0,
-  "cycle_tracked_added": 0,
-  "cycle_evaluated_tokens": 0,
-  "cycle_deep_rejected": 0
+  "cycle_raw_seen": 715,
+  "cycle_discovery_rejected": 688,
+  "cycle_tracked_added": 10,
+  "cycle_evaluated_tokens": 193,
+  "cycle_deep_rejected": 88
 }

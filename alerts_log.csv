@@ -1,0 +1,1 @@
+timestamp,alert_type,mint,name,source,score,market_cap,liquidity,first_seen_mc,max_seen_mc,age_min,top1_pct,top3_pct,migration_flag,alpha_hits,x100_hits,elite_prebuy_hits,early_liq_migration,grad_predictor,alpha_cluster,creator_rep,watchers_velocity,early_buys,early_unique_buyers,dev_sold,tradeability_ok,risk_ok,dex_url
