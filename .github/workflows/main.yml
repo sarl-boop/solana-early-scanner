@@ -1,23 +1,21 @@
-
-name: Solana Sniper Scanner Extreme
+name: Solana Early Scanner Extreme
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
 
-concurrency:
-  group: solana-sniper-bot
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
-  run-bot:
+  run-scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 355
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -27,7 +25,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests websockets
+          pip install -r requirements.txt || pip install requests websockets
+
+      - name: Ensure required files exist
+        run: |
+          test -f state.json || echo '{}' > state.json
+          test -f alerts_log.csv || echo 'timestamp,alert_type,mint,name,source,score,market_cap,liquidity,first_seen_mc,max_seen_mc,age_min,top1_pct,top3_pct,migration_flag,alpha_hits,x100_hits,elite_prebuy_hits,early_liq_migration,grad_predictor,alpha_cluster,creator_rep,watchers_velocity,early_buys,early_unique_buyers,dev_sold,tradeability_ok,risk_ok,dex_url' > alerts_log.csv
+          test -f paper_trades_log.csv || echo 'timestamp,event,mint,name,paper_signal,size_eur,entry_mc,current_mc,roi_pct,source,status' > paper_trades_log.csv
+          test -f shortlist_log.csv || echo 'timestamp,mint,name,score,market_cap,liquidity,source,reason_1,reason_2,reason_3,dex_url' > shortlist_log.csv
 
       - name: Run scanner
         env:
@@ -41,3 +46,13 @@ jobs:
           HONEYPOT_URL: ${{ secrets.HONEYPOT_URL }}
         run: |
           python scanner.py
+
+      - name: Commit updated state and logs
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add state.json alerts_log.csv paper_trades_log.csv shortlist_log.csv
+          git diff --cached --quiet || git commit -m "Update scanner state and logs"
+          git push || true
