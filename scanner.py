@@ -1754,15 +1754,15 @@ async def websocket_loop():
                             await subscribe_account_trade_once(ws, wallet)
 
                     raw = await ws.recv()
-dbg("RAW WS:", raw[:500] if isinstance(raw, str) else raw)
+                    dbg("RAW WS:", raw[:300] if isinstance(raw, str) else raw)
 
-payload = extract_message_payload(raw)
-if not payload:
-    dbg("IGNORED WS MESSAGE")
-    continue
+                    payload = extract_message_payload(raw)
+                    if not payload:
+                        dbg("IGNORED WS MESSAGE")
+                        continue
 
-STATE["cycle_raw_seen"] += 1
-dbg("COUNTED WS MESSAGE:", json.dumps(payload)[:500])
+                    STATE["cycle_raw_seen"] += 1
+                    dbg("COUNTED WS MESSAGE:", json.dumps(payload)[:300])
 
                     mint = extract_mint(payload)
                     event_text = json.dumps(payload).lower()
