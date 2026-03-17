@@ -58,6 +58,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
           git add state.json alerts_log.csv paper_trades_log.csv shortlist_log.csv
           git diff --cached --quiet || git commit -m "Update scanner state and logs"
-          git push
+          git push || true
