@@ -1618,8 +1618,8 @@ def evaluate_token(mint: str) -> None:
 
     send_discord(build_alert(pair, token_state, holder_stats, score, alert_type))
     mark_alerted(alert_key)
-    
-name = token_state.get("name") or mint[:6]
+
+    name = token_state.get("name") or mint[:6]
     source = token_state.get("source", "unknown")
     dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
