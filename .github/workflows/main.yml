@@ -1,4 +1,4 @@
-name: Crypto Sniper Clean
+name: Solana Sniper Scanner Extreme
 
 on:
   workflow_dispatch:
@@ -6,23 +6,37 @@ on:
     - cron: "*/5 * * * *"
 
 concurrency:
-  group: sniper-bot
+  group: solana-sniper-bot
   cancel-in-progress: true
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install requests websockets
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests websockets
 
-      - run: python scanner.py
+      - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          PUMPPORTAL_API_KEY: ${{ secrets.PUMPPORTAL_API_KEY }}
+          SMART_WALLETS: ${{ secrets.SMART_WALLETS }}
+          HELD_TOKENS: ${{ secrets.HELD_TOKENS }}
+          RUGCHECK_URL: ${{ secrets.RUGCHECK_URL }}
+          GOPLUS_URL: ${{ secrets.GOPLUS_URL }}
+          HONEYPOT_URL: ${{ secrets.HONEYPOT_URL }}
+        run: |
+          python scanner.py
