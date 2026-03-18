@@ -1653,9 +1653,6 @@ def evaluate_token(mint: str) -> None:
         mark_buy_alert_sent()
         open_paper_position(mint, token_state, pair, alert_type)
         
-    await ws.send(json.dumps(payload))
-    dbg("subscribed:", method, keys if keys else "")
-
 
 async def subscribe_token_trade_once(ws, mint: str):
     if mint in SUBSCRIBED_TOKEN_TRADES:
