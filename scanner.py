@@ -1622,4 +1622,291 @@ def evaluate_token(mint: str) -> None:
     if alert_type == "GOLD":
         mark_buy_alert_sent()
         open_paper_position(mint, token_state, pair, alert_type)
+
+name = token_state.get("name") or mint[:6]
+    source = token_state.get("source", "unknown")
+    dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+
+    with ALERT_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow([
+            now_ts(), alert_type, mint, name, source, score,
+            round(mc, 2), round(liq, 2),
+            round(to_float(token_state.get("first_seen_mc", 0.0)), 2),
+            round(to_float(token_state.get("max_seen_mc", 0.0)), 2),
+            round(age_min, 2),
+            round(holder_stats.get("top1_pct", 0.0), 4),
+            round(holder_stats.get("top3_pct", 0.0), 4),
+            bool(token_state.get("migration_flag", False)),
+            len(token_state.get("smart_wallet_hits", [])),
+            len(token_state.get("x100_wallet_hits", [])),
+            len(token_state.get("elite_prebuy_hits", [])),
+            bool(early_liquidity_migration_detector(token_state)),
+            bool(pump_fun_graduation_predictor(token_state, pair)),
+            bool(alpha_wallet_cluster_signal(token_state)),
+            bool(creator_reputation_signal(token_state)),
+            bool(watchers_velocity_signal(token_state)),
+            int(token_state.get("early_buys", 0)),
+            len(token_state.get("early_unique_buyers", [])),
+            bool(token_state.get("dev_sold", False)),
+            bool(token_state.get("tradeability_ok", True)),
+            bool(token_state.get("risk_ok", True)),
+            dex_url,
+        ])
+
+    if alert_type == "GOLD":
+        mark_buy_alert_sent()
+        open_paper_position(mint, token_state, pair, alert_type)
+
+
+# =========================================================
+# SUBSCRIPTIONS
+# =========================================================
+
+async def subscribe(ws, method: str, keys: Optional[List[str]] = None):
+    payload = {"method": method}
+    if keys:
+        payload["keys"] = keys
+    await ws.send(json.dumps(payload))
+    dbg("subscribed:", method, keys if keys else "")
+
+
+async def subscribe_token_trade_once(ws, mint: str):
+    if mint in SUBSCRIBED_TOKEN_TRADES:
+        return
+    await subscribe(ws, "subscribeTokenTrade", [mint])
+    SUBSCRIBED_TOKEN_TRADES.add(mint)
+
+
+async def subscribe_account_trade_once(ws, wallet: str):
+    if not wallet or wallet in SUBSCRIBED_ACCOUNT_WALLETS:
+        return
+    await subscribe(ws, "subscribeAccountTrade", [wallet])
+    SUBSCRIBED_ACCOUNT_WALLETS.add(wallet)
+
+
+def discovery_accepts_pair(pair: Optional[dict]) -> bool:
+    if not pair:
+        return False
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    if mc <= 0 or mc > MAX_DISCOVERY_MC:
+        return False
+    if liq < MIN_LIQUIDITY:
+        return False
+    if fake_liquidity_risk(mc, liq):
+        return False
+    return True
+
+
+# =========================================================
+# LOOPS
+# =========================================================
+
+async def websocket_loop():
+    while True:
+        try:
+            async with websockets.connect(PUMPPORTAL_WS, ping_interval=20, ping_timeout=20) as ws:
+                dbg("connected to PumpPortal")
+
+                await subscribe(ws, "subscribeNewToken")
+                await subscribe(ws, "subscribeMigration")
+
+                watched_wallets = list(set(SMART_WALLETS) | learned_alpha_wallets() | learned_x100_wallets())
+                for wallet in watched_wallets:
+                    await subscribe_account_trade_once(ws, wallet)
+
+                while True:
+                    latest_wallets = list(set(learned_alpha_wallets()) | learned_x100_wallets())
+                    for wallet in latest_wallets:
+                        if wallet not in SUBSCRIBED_ACCOUNT_WALLETS:
+                            await subscribe_account_trade_once(ws, wallet)
+
+                    raw = await ws.recv()
+                    payload = extract_message_payload(raw)
+                    if not payload:
+                        continue
+
+                    STATE["cycle_raw_seen"] += 1
+
+                    mint = extract_mint(payload)
+                    event_text = json.dumps(payload).lower()
+
+                    if mint and ("name" in payload and "symbol" in payload):
+                        pair = get_best_pair(mint)
+                        if discovery_accepts_pair(pair):
+                            rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "new_token")
+                            rec["launch_seen_ts"] = now_ts()
+                            STATE["cycle_tracked_added"] += 1
+                            await subscribe_token_trade_once(ws, mint)
+                        else:
+                            STATE["cycle_discovery_rejected"] += 1
+
+                    if mint and "migration" in event_text:
+                        pair = get_best_pair(mint)
+                        if discovery_accepts_pair(pair):
+                            rec = ensure_token(mint, extract_name(payload), extract_symbol(payload), "migration")
+                            rec["migration_flag"] = True
+                            STATE["cycle_tracked_added"] += 1
+                            await subscribe_token_trade_once(ws, mint)
+                        else:
+                            STATE["cycle_discovery_rejected"] += 1
+                        continue
+
+                    if not mint:
+                        continue
+
+                    side = extract_side(payload)
+                    wallet = extract_wallet(payload)
+                    usd_est = extract_amount_usd(payload)
+
+                    if side:
+                        update_trade_tracking(mint, wallet, side, usd_est)
+
+                        if wallet and wallet in SMART_WALLETS:
+                            add_alpha_hit(mint, wallet)
+                        if wallet and wallet in learned_alpha_wallets():
+                            add_alpha_hit(mint, wallet)
+                        if wallet and wallet in learned_x100_wallets():
+                            add_x100_hit(mint, wallet)
+
+        except Exception as e:
+            print("websocket error, reconnecting:", e)
+            await asyncio.sleep(5)
+
+
+async def gecko_new_pools_loop():
+    while True:
+        try:
+            pools = fetch_gecko_new_pools()
+            added = 0
+
+            for item in pools:
+                if added >= GECKO_MAX_ADD_PER_CYCLE:
+                    break
+
+                STATE["cycle_raw_seen"] += 1
+                mint = item["mint"]
+
+                if mint in STATE["tokens"]:
+                    continue
+
+                pair = get_best_pair(mint)
+                if not discovery_accepts_pair(pair):
+                    STATE["cycle_discovery_rejected"] += 1
+                    continue
+
+                rec = ensure_token(
+                    mint,
+                    item.get("name", ""),
+                    item.get("symbol", ""),
+                    item.get("source", "gecko_new_pool"),
+                )
+                rec["launch_seen_ts"] = now_ts()
+                STATE["cycle_tracked_added"] += 1
+                added += 1
+        except Exception as e:
+            dbg("gecko loop error:", e)
+
+        await asyncio.sleep(GECKO_REFRESH_SECONDS)
+
+
+async def evaluator_loop():
+    while True:
+        try:
+            cleanup_state()
+            for mint in list(STATE.get("tokens", {}).keys()):
+                evaluate_token(mint)
+        except Exception as e:
+            print("evaluator error:", e)
+
+        await asyncio.sleep(EVALUATE_INTERVAL_SECONDS)
+
+
+async def paper_positions_loop():
+    while True:
+        try:
+            for mint, pos in list(STATE.get("paper_positions", {}).items()):
+                if pos.get("status") != "OPEN":
+                    continue
+                pair = get_best_pair(mint)
+                if not pair:
+                    continue
+                current_mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+                if current_mc <= 0:
+                    continue
+                process_paper_winner(mint, current_mc)
+                process_paper_stop(mint, current_mc)
+        except Exception as e:
+            print("paper loop error:", e)
+
+        await asyncio.sleep(PAPER_CHECK_INTERVAL_SECONDS)
+
+
+async def save_loop():
+    while True:
+        save_state()
+        await asyncio.sleep(SAVE_INTERVAL_SECONDS)
+
+
+async def heartbeat_loop():
+    while True:
+        try:
+            now = now_ts()
+            if now - int(STATE.get("last_heartbeat", 0)) >= HEARTBEAT_INTERVAL_SECONDS:
+                tracked = len(STATE.get("tokens", {}))
+                raw_seen = int(STATE.get("cycle_raw_seen", 0))
+                discovery_rejected = int(STATE.get("cycle_discovery_rejected", 0))
+                tracked_added = int(STATE.get("cycle_tracked_added", 0))
+                evaluated = int(STATE.get("cycle_evaluated_tokens", 0))
+                deep_rejected = int(STATE.get("cycle_deep_rejected", 0))
+                paper_open = sum(
+                    1 for p in STATE.get("paper_positions", {}).values()
+                    if p.get("status") == "OPEN"
+                )
+                learned_x100 = len(STATE.get("x100_discovered_wallets", []))
+                learned_alpha = len(STATE.get("alpha_discovered_wallets", []))
+
+                send_discord(
+                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
+                    f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
+                    f"deep_rejected {deep_rejected} — paper open {paper_open} — "
+                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — extreme x100 mode"
+                )
+
+                STATE["last_heartbeat"] = now
+                STATE["cycle_raw_seen"] = 0
+                STATE["cycle_discovery_rejected"] = 0
+                STATE["cycle_tracked_added"] = 0
+                STATE["cycle_evaluated_tokens"] = 0
+                STATE["cycle_deep_rejected"] = 0
+
+        except Exception as e:
+            print("heartbeat error:", e)
+
+        await asyncio.sleep(30)
+
+
+async def main():
+    load_state()
+    cleanup_state()
+    ensure_files()
+
+    dbg("manual smart wallets:", len(SMART_WALLETS))
+    dbg("learned alpha wallets:", len(STATE.get("alpha_discovered_wallets", [])))
+    dbg("learned x100 wallets:", len(STATE.get("x100_discovered_wallets", [])))
+    dbg("rpc enabled:", bool(SOLANA_RPC_URL))
+    dbg("pumpportal api key enabled:", bool(PUMPPORTAL_API_KEY))
+
+    await asyncio.gather(
+        websocket_loop(),
+        gecko_new_pools_loop(),
+        evaluator_loop(),
+        paper_positions_loop(),
+        save_loop(),
+        heartbeat_loop(),
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
     
