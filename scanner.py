@@ -1250,7 +1250,7 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
         score += 1
     if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
         score += 1
-1
+
     elif v5 > 1200:
         score += 1
 
@@ -1618,40 +1618,36 @@ def evaluate_token(mint: str) -> None:
 
     send_discord(build_alert(pair, token_state, holder_stats, score, alert_type))
     mark_alerted(alert_key)
-
-    if alert_type == "GOLD":
-        mark_buy_alert_sent()
-        open_paper_position(mint, token_state, pair, alert_type)
-
-name = token_state.get("name") or mint[:6]
-    source = token_state.get("source", "unknown")
-    dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+    
+        name = token_state.get("name") or mint[:6]
+        source = token_state.get("source", "unknown")
+        dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
     with ALERT_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow([
-            now_ts(), alert_type, mint, name, source, score,
-            round(mc, 2), round(liq, 2),
-            round(to_float(token_state.get("first_seen_mc", 0.0)), 2),
-            round(to_float(token_state.get("max_seen_mc", 0.0)), 2),
-            round(age_min, 2),
-            round(holder_stats.get("top1_pct", 0.0), 4),
-            round(holder_stats.get("top3_pct", 0.0), 4),
-            bool(token_state.get("migration_flag", False)),
-            len(token_state.get("smart_wallet_hits", [])),
-            len(token_state.get("x100_wallet_hits", [])),
-            len(token_state.get("elite_prebuy_hits", [])),
-            bool(early_liquidity_migration_detector(token_state)),
-            bool(pump_fun_graduation_predictor(token_state, pair)),
-            bool(alpha_wallet_cluster_signal(token_state)),
-            bool(creator_reputation_signal(token_state)),
-            bool(watchers_velocity_signal(token_state)),
-            int(token_state.get("early_buys", 0)),
-            len(token_state.get("early_unique_buyers", [])),
-            bool(token_state.get("dev_sold", False)),
-            bool(token_state.get("tradeability_ok", True)),
-            bool(token_state.get("risk_ok", True)),
-            dex_url,
-        ])
+                now_ts(), alert_type, mint, name, source, score,
+                round(mc, 2), round(liq, 2),
+                round(to_float(token_state.get("first_seen_mc", 0.0)), 2),
+                round(to_float(token_state.get("max_seen_mc", 0.0)), 2),
+                round(age_min, 2),
+                round(holder_stats.get("top1_pct", 0.0), 4),
+                round(holder_stats.get("top3_pct", 0.0), 4),
+                bool(token_state.get("migration_flag", False)),
+                len(token_state.get("smart_wallet_hits", [])),
+                len(token_state.get("x100_wallet_hits", [])),
+                len(token_state.get("elite_prebuy_hits", [])),
+                bool(early_liquidity_migration_detector(token_state)),
+                bool(pump_fun_graduation_predictor(token_state, pair)),
+                bool(alpha_wallet_cluster_signal(token_state)),
+                bool(creator_reputation_signal(token_state)),
+                bool(watchers_velocity_signal(token_state)),
+                int(token_state.get("early_buys", 0)),
+                len(token_state.get("early_unique_buyers", [])),
+                bool(token_state.get("dev_sold", False)),
+                bool(token_state.get("tradeability_ok", True)),
+                bool(token_state.get("risk_ok", True)),
+                dex_url,
+            ])
 
     if alert_type == "GOLD":
         mark_buy_alert_sent()
