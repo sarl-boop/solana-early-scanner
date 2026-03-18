@@ -1619,7 +1619,7 @@ def evaluate_token(mint: str) -> None:
     send_discord(build_alert(pair, token_state, holder_stats, score, alert_type))
     mark_alerted(alert_key)
     
-        name = token_state.get("name") or mint[:6]
+name = token_state.get("name") or mint[:6]
     source = token_state.get("source", "unknown")
     dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
 
@@ -1652,6 +1652,7 @@ def evaluate_token(mint: str) -> None:
     if alert_type == "GOLD":
         mark_buy_alert_sent()
         open_paper_position(mint, token_state, pair, alert_type)
+        
     await ws.send(json.dumps(payload))
     dbg("subscribed:", method, keys if keys else "")
 
