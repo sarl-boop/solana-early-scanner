@@ -1249,5 +1249,283 @@ def compute_score(pair: dict, token_state: dict, holder_stats: dict) -> int:
     if age_min <= 25:
         score += 1
     if v1 > 0 and v5 * 12 > v1 * 0.08 and v5 > 700:
-        score +=
+        score += 1
+1
+    elif v5 > 1200:
+        score += 1
+
+    if early_pump_signal(token_state):
+        score += 1
+    if holder_explosion_signal(token_state):
+        score += 2
+    if volume_burst_signal(token_state):
+        score += 2
+    if wallet_cluster_signal(token_state):
+        score += 2
+    if alpha_wallet_cluster_signal(token_state):
+        score += 4
+    if creator_reputation_signal(token_state):
+        score += 3
+    if watchers_velocity_signal(token_state):
+        score += 2
+    if liquidity_add_signal(token_state):
+        score += 3
+    if early_liquidity_migration_detector(token_state):
+        score += 3
+    if pump_fun_graduation_predictor(token_state, pair):
+        score += 3
+    if dev_accumulation_signal(token_state):
+        score += 1
+    if pre_migration_x50_signal(token_state, pair):
+        score += 3
+    if elite_prebuy_signal(token_state):
+        score += 4
+
+    alpha_hits = len(token_state.get("smart_wallet_hits", []))
+    x100_hits = len(token_state.get("x100_wallet_hits", []))
+
+    if alpha_hits >= 1:
+        score += 2
+    if alpha_hits >= 2:
+        score += 4
+    if alpha_hits >= 3:
+        score += 6
+    if x100_hits >= 1:
+        score += 4
+
+    if cult_meme_proxy_signal(token_state, pair, holder_stats):
+        score += 2
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        score += 3
+    if fast_roi_signal(token_state, pair, holder_stats):
+        score += 3
+
+    if token_state.get("migration_flag", False):
+        score += 1
+    if token_state.get("lp_safe", False):
+        score += 1
+
+    if holder_stats.get("soft_penalty", False):
+        score -= 3
+    if sniper_trap_risk(token_state):
+        score -= 4
+    if dev_supply_proxy_risk(token_state):
+        score -= 5
+    if wash_trading_risk(v24, liq):
+        score -= 3
+    if token_state.get("dev_sold", False):
+        score -= 6
+    if token_state.get("lp_risk", False):
+        score -= 6
+    if not token_state.get("tradeability_ok", True):
+        score -= 6
+    if not token_state.get("risk_ok", True):
+        score -= 6
+    if momentum_only_signal(token_state):
+        score -= 4
+
+    return max(0, min(10, score))
+
+
+# =========================================================
+# PAPER
+# =========================================================
+
+def open_paper_position(mint: str, token_state: dict, pair: dict, alert_type: str) -> None:
+    if alert_type != "GOLD":
+        return
+    if mint in STATE.get("paper_positions", {}):
+        return
+
+    size = PAPER_GOLD_SIZE_EUR
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    name = token_state.get("name") or mint[:6]
+    source = token_state.get("source", "unknown")
+
+    STATE.setdefault("paper_positions", {})[mint] = {
+        "mint": mint,
+        "name": name,
+        "signal": alert_type,
+        "size_eur": size,
+        "entry_mc": mc,
+        "opened_ts": now_ts(),
+        "status": "OPEN",
+        "source": source,
+        "winner_notified": False,
+        "stop_notified": False,
+    }
+
+    with PAPER_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(
+            [now_ts(), "OPEN", mint, name, alert_type, size, mc, mc, 0.0, source, "OPEN"]
+        )
+
+
+def process_paper_winner(mint: str, current_mc: float) -> None:
+    pos = STATE.get("paper_positions", {}).get(mint)
+    if not pos or pos.get("status") != "OPEN":
+        return
+
+    entry_mc = to_float(pos.get("entry_mc", 0.0))
+    if entry_mc <= 0:
+        return
+
+    roi = (current_mc - entry_mc) / entry_mc
+    if roi < PAPER_WINNER_ROI or pos.get("winner_notified", False):
+        return
+
+    pos["winner_notified"] = True
+    name = pos.get("name", mint[:6])
+
+    send_discord(
+        f"🚀 PAPER WINNER | {name}\nROI +{roi*100:.0f}%\nMC {compact_k(entry_mc)} → {compact_k(current_mc)}"
+    )
+
+    token_state = STATE.get("tokens", {}).get(mint, {})
+    roi_multiple = current_mc / entry_mc if entry_mc > 0 else 0.0
+
+    for wallet in token_state.get("first_buy_wallets", []):
+        update_wallet_stats_from_winner(wallet, roi_multiple)
+
+    with PAPER_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(
+            [now_ts(), "WINNER", mint, name, pos.get("signal", ""), pos.get("size_eur", 0.0),
+             entry_mc, current_mc, roi * 100.0, pos.get("source", "unknown"), "WINNER"]
+        )
+
+
+def process_paper_stop(mint: str, current_mc: float) -> None:
+    pos = STATE.get("paper_positions", {}).get(mint)
+    if not pos or pos.get("status") != "OPEN":
+        return
+
+    entry_mc = to_float(pos.get("entry_mc", 0.0))
+    if entry_mc <= 0:
+        return
+
+    roi = (current_mc - entry_mc) / entry_mc
+    if roi > PAPER_STOP_ROI or pos.get("stop_notified", False):
+        return
+
+    pos["stop_notified"] = True
+    name = pos.get("name", mint[:6])
+
+    send_discord(
+        f"⚠️ PAPER STOP | {name}\nROI {roi*100:.0f}%\nMC {compact_k(entry_mc)} → {compact_k(current_mc)}"
+    )
+
+    with PAPER_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(
+            [now_ts(), "STOP", mint, name, pos.get("signal", ""), pos.get("size_eur", 0.0),
+             entry_mc, current_mc, roi * 100.0, pos.get("source", "unknown"), "STOP"]
+        )
+
+
+# =========================================================
+# ALERTS
+# =========================================================
+
+def shortlist_reasons(token_state: dict, pair: dict, holder_stats: dict) -> List[str]:
+    reasons = []
+    if elite_prebuy_signal(token_state):
+        reasons.append("elite prebuy")
+    if alpha_wallet_cluster_signal(token_state):
+        reasons.append("alpha cluster")
+    if creator_reputation_signal(token_state):
+        reasons.append("creator reputation")
+    if watchers_velocity_signal(token_state):
+        reasons.append("watchers velocity")
+    if early_liquidity_migration_detector(token_state):
+        reasons.append("early liquidity migration")
+    if pump_fun_graduation_predictor(token_state, pair):
+        reasons.append("graduation predictor")
+    if len(token_state.get("x100_wallet_hits", [])) >= 1:
+        reasons.append("x100 wallet")
+    if fast_roi_signal(token_state, pair, holder_stats):
+        reasons.append("fast roi")
+    if swing_conviction_signal(token_state, pair, holder_stats):
+        reasons.append("swing conviction")
+    if not reasons:
+        reasons.append("near-threshold")
+    return reasons[:3]
+
+
+def build_alert(pair: dict, token_state: dict, holder_stats: dict, score: int, alert_type: str) -> str:
+    mint = token_state["mint"]
+    name = token_state.get("name") or mint[:6]
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    pair_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+
+    reasons = shortlist_reasons(token_state, pair, holder_stats)
+    color = "🔴 RED" if alert_type == "RED" else "🟡 GOLD"
+    action = "Sell" if alert_type == "RED" else "Buy 25€ or 50€"
+
+    return (
+        f"{name}\n"
+        f"Score: {score}/10\n"
+        f"Color: {color}\n"
+        f"Market cap: ${compact_k(mc)}\n"
+        f"Liquidity: ${compact_k(liq)}\n"
+        f"Reason: {', '.join(reasons)}\n"
+        f"Action: {action}\n"
+        f"Dex: <{pair_url}>"
+    )
+
+
+def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> str:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq_tier = liquidity_quality_tier(mc, to_float((pair.get("liquidity") or {}).get("usd"), 0.0))
+
+    if hard_red:
+        return "RED" if token_state["mint"] in HELD_TOKENS else "IGNORE"
+
+    if liq_tier == "weak":
+        return "IGNORE"
+    if not (MIN_GOLD_MC <= mc <= MAX_GOLD_MC):
+        return "IGNORE"
+    if not can_send_buy_alert():
+        return "IGNORE"
+
+    if (
+        has_real_action_signal(token_state, pair, holder_stats)
+        and live_confirmation_count(pair, token_state, holder_stats) >= 5
+        and score >= GOLD_SCORE
+    ):
+        return "GOLD"
+
+    return "IGNORE"
+
+
+def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score: int, hard_red: bool) -> bool:
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    if hard_red or mc <= 0 or mc > MAX_DISCOVERY_MC:
+        return False
+    if score < SHORTLIST_SCORE or score >= GOLD_SCORE:
+        return False
+    if holder_stats.get("hard_reject", False):
+        return False
+    if dev_supply_proxy_risk(token_state) or token_state.get("lp_risk", False):
+        return False
+    if token_state.get("dev_sold", False):
+        return False
+    if not token_state.get("tradeability_ok", True):
+        return False
+    if not token_state.get("risk_ok", True):
+        return False
+
+    return (
+        elite_prebuy_signal(token_state)
+        or alpha_wallet_cluster_signal(token_state)
+        or creator_reputation_signal(token_state)
+        or watchers_velocity_signal(token_state)
+        or early_liquidity_migration_detector(token_state)
+        or pump_fun_graduation_predictor(token_state, pair)
+        or fast_roi_signal(token_state, pair, holder_stats)
+        or swing_conviction_signal(token_state, pair, holder_stats)
+        or len(token_state.get("x100_wallet_hits", [])) >= 1
+        or cult_meme_proxy_signal(token_state, pair, holder_stats)
+)
+
+
     
