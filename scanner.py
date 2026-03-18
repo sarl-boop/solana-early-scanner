@@ -1527,5 +1527,99 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
         or cult_meme_proxy_signal(token_state, pair, holder_stats)
 )
 
+# =========================================================
+# EVALUATION
+# =========================================================
 
+def evaluate_token(mint: str) -> None:
+    token_state = STATE["tokens"].get(mint)
+    if not token_state:
+        return
+
+    pair = get_best_pair(mint)
+    if not pair:
+        STATE["cycle_deep_rejected"] += 1
+        return
+
+    mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
+    liq = to_float((pair.get("liquidity") or {}).get("usd"), 0.0)
+    vol = pair.get("volume") or {}
+    v5 = to_float(vol.get("m5"), 0.0)
+    v1 = to_float(vol.get("h1"), 0.0)
+    v24 = to_float(vol.get("h24"), 0.0)
+    age_min = max(0.0, (now_ts() - token_state["first_seen_ts"]) / 60.0)
+
+    token_state["last_pair_url"] = pair.get("url") or ""
+    token_state["last_seen_ts"] = now_ts()
+    token_state["liq_lock_hint"] = liquidity_lock_hint(pair)
+
+    current_liq = liq
+    last_liq = to_float(token_state.get("last_liquidity_usd", 0.0), 0.0)
+    if current_liq > 0:
+        if last_liq != current_liq:
+            token_state["liq_history"].append({"ts": now_ts(), "liq": current_liq})
+        token_state["last_liquidity_usd"] = current_liq
+
+    watchers = int(pair.get("watchers", 0)) if isinstance(pair, dict) else 0
+    token_state["watchers_history"].append({"ts": now_ts(), "value": watchers})
+
+    prune_old_events(token_state)
+
+    risk_ok, risk_signals, _ = optional_risk_check(mint)
+    token_state["risk_ok"] = risk_ok
+    token_state["lp_safe"] = bool(risk_signals.get("lp_safe")) or token_state.get("liq_lock_hint", False)
+    token_state["lp_risk"] = bool(risk_signals.get("lp_risk", False))
+    token_state["tradeability_ok"] = anti_honeypot_guard(pair)
+
+    if token_state["first_seen_mc"] <= 0 and mc > 0:
+        token_state["first_seen_mc"] = mc
+
+    token_state["max_seen_mc"] = max(token_state.get("max_seen_mc", 0.0), mc)
+
+    update_dev_wallet_reputation(token_state, mc)
+
+    STATE["cycle_evaluated_tokens"] = int(STATE.get("cycle_evaluated_tokens", 0)) + 1
+
+    # HARD FILTERS
+    if mc <= 0 or mc > MAX_DISCOVERY_MC:
+        STATE["cycle_deep_rejected"] += 1
+        return
+    if liq < MIN_LIQUIDITY:
+        STATE["cycle_deep_rejected"] += 1
+        return
+    if age_min < 1:
+        STATE["cycle_deep_rejected"] += 1
+        return
+
+    holder_stats = get_holder_stats(mint)
+
+    hard_red = (
+        holder_stats.get("hard_reject", False)
+        or fake_liquidity_risk(mc, liq)
+        or sniper_trap_risk(token_state)
+        or dev_supply_proxy_risk(token_state)
+        or token_state.get("dev_sold", False)
+        or token_state.get("lp_risk", False)
+        or not token_state.get("tradeability_ok", True)
+        or not token_state.get("risk_ok", True)
+    )
+
+    score = compute_score(pair, token_state, holder_stats)
+
+    alert_type = classify_alert_type(pair, token_state, holder_stats, score, hard_red)
+
+    if alert_type == "IGNORE":
+        STATE["cycle_deep_rejected"] += 1
+        return
+
+    alert_key = f"{alert_type}:{mint}"
+    if recently_alerted(alert_key):
+        return
+
+    send_discord(build_alert(pair, token_state, holder_stats, score, alert_type))
+    mark_alerted(alert_key)
+
+    if alert_type == "GOLD":
+        mark_buy_alert_sent()
+        open_paper_position(mint, token_state, pair, alert_type)
     
