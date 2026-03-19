@@ -47,7 +47,7 @@ SHORTLIST_LOG_FILE = Path("shortlist_log.csv")
 DEBUG = True
 
 # cadence
-HEARTBEAT_INTERVAL_SECONDS = 120
+HEARTBEAT_INTERVAL_SECONDS = 300
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
 GECKO_REFRESH_SECONDS = 25
@@ -70,7 +70,7 @@ MAX_TRACKED_TOKENS = 700
 GECKO_MAX_ADD_PER_CYCLE = 150
 
 GOLD_SCORE = 5
-SHORTLIST_SCORE = 4
+SHORTLIST_SCORE = 3
 
 MIN_GOLD_MC = 8_000
 MAX_GOLD_MC = 250_000
@@ -1490,7 +1490,7 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
 
     if (
         has_real_action_signal(token_state, pair, holder_stats)
-        and live_confirmation_count(pair, token_state, holder_stats) >= 5
+        and live_confirmation_count(pair, token_state, holder_stats) >= 3
         and score >= GOLD_SCORE
     ):
         return "GOLD"
