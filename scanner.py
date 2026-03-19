@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 import websockets
 
+LAST_HEARTBEAT_TS = 0
 
 # =========================================================
 # CONFIG
@@ -1501,7 +1502,7 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
     mc = to_float(pair.get("marketCap") or pair.get("fdv"), 0.0)
     if hard_red or mc <= 0 or mc > MAX_DISCOVERY_MC:
         return False
-    if score < SHORTLIST_SCORE or score >= GOLD_SCORE:
+    if score < 3 or score >= GOLD_SCORE:
         return False
     if holder_stats.get("hard_reject", False):
         return False
@@ -1510,8 +1511,6 @@ def qualifies_shortlist(pair: dict, token_state: dict, holder_stats: dict, score
     if token_state.get("dev_sold", False):
         return False
     if not token_state.get("tradeability_ok", True):
-        return False
-    if not token_state.get("risk_ok", True):
         return False
 
     return (
@@ -1849,12 +1848,20 @@ async def heartbeat_loop():
                 )
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
                 learned_alpha = len(STATE.get("alpha_discovered_wallets", []))
-            if raw_seen >= 200 or tracked >= 20:
-                send_discord(
-                    f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
-                    f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
-                    f"deep_rejected {deep_rejected} — paper open {paper_open} — "
-                    f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — extreme x100 mode"
+                
+            global LAST_HEARTBEAT_TS
+                if time.time() - LAST_HEARTBEAT_TS < 60:
+                    await asyncio.sleep(30)
+                    continue
+
+                LAST_HEARTBEAT_TS = time.time()
+
+                if raw_seen >= 200 or tracked >= 20:
+                    send_discord(
+                        f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
+                        f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
+                        f"deep_rejected {deep_rejected} — paper open {paper_open} — "
+                        f"x100 wallets {learned_x100} — alpha wallets {learned_alpha} — extreme x100 mode"
                 )
 
                 STATE["last_heartbeat"] = now
