@@ -3,7 +3,7 @@ name: Solana Sniper Scanner Extreme
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
 
 concurrency:
   group: solana-sniper-bot
