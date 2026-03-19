@@ -1849,14 +1849,13 @@ async def heartbeat_loop():
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
                 learned_alpha = len(STATE.get("alpha_discovered_wallets", []))
                 
-            global LAST_HEARTBEAT_TS
-                if time.time() - LAST_HEARTBEAT_TS < 60:
-                    await asyncio.sleep(30)
-                    continue
-
-                LAST_HEARTBEAT_TS = time.time()
-
-                if raw_seen >= 200 or tracked >= 20:
+                global LAST_HEARTBEAT_TS
+                 if time.time() - LAST_HEARTBEAT_TS < 60:
+                  await asyncio.sleep(30)
+                 continue
+            LAST_HEARTBEAT_TS = time.time()
+            
+                 if raw_seen >= 200 or tracked >= 20:
                     send_discord(
                         f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                         f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
