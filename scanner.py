@@ -68,8 +68,8 @@ NO_CHASE_MULTIPLIER = 2.2
 MAX_TRACKED_TOKENS = 700
 GECKO_MAX_ADD_PER_CYCLE = 150
 
-GOLD_SCORE = 6
-SHORTLIST_SCORE = 5
+GOLD_SCORE = 5
+SHORTLIST_SCORE = 4
 
 MIN_GOLD_MC = 8_000
 MAX_GOLD_MC = 250_000
@@ -90,8 +90,8 @@ LOCKER_KEYWORDS = ["locker", "locked", "burn", "null", "dead", "renounced"]
 
 # wallet learning
 WALLET_HUNTER_X100_ROI = 100.0
-WALLET_HUNTER_FALLBACK_ROI = 20.0
-WALLET_HUNTER_FALLBACK_WINS = 2
+WALLET_HUNTER_FALLBACK_ROI = 10.0
+WALLET_HUNTER_FALLBACK_WINS = 1
 
 # microstructure
 BURST_WINDOW_SECONDS = 30
@@ -124,7 +124,7 @@ WATCHERS_MIN_ABS = 50
 WATCHERS_MULTIPLIER = 3.0
 
 # creator reputation
-DEV_REPUTATION_WIN_MULTIPLE = 20.0
+DEV_REPUTATION_WIN_MULTIPLE = 10.0
 DEV_REPUTATION_MIN_WINS = 1
 
 
@@ -1849,7 +1849,7 @@ async def heartbeat_loop():
                 )
                 learned_x100 = len(STATE.get("x100_discovered_wallets", []))
                 learned_alpha = len(STATE.get("alpha_discovered_wallets", []))
-
+            if raw_seen >= 200 or tracked >= 20:
                 send_discord(
                     f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                     f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
