@@ -1159,7 +1159,7 @@ def live_confirmation_count(pair: dict, token_state: dict, holder_stats: dict) -
     total = buys + sells
 
     count = 0
-    if mc > 0 and liq >= mc * 0.15:
+    if mc > 0 and liq >= mc * 0.10:
         count += 1
     if total >= 2 and buys >= sells:
         count += 1
