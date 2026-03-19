@@ -47,7 +47,7 @@ SHORTLIST_LOG_FILE = Path("shortlist_log.csv")
 DEBUG = True
 
 # cadence
-HEARTBEAT_INTERVAL_SECONDS = 300
+HEARTBEAT_INTERVAL_SECONDS = 120
 SAVE_INTERVAL_SECONDS = 30
 EVALUATE_INTERVAL_SECONDS = 12
 GECKO_REFRESH_SECONDS = 25
@@ -1855,7 +1855,7 @@ async def heartbeat_loop():
                     continue
                 LAST_HEARTBEAT_TS = time.time()
             
-                if raw_seen >= 500 or tracked >= 50:
+                if raw_seen >= 100 or tracked >= 10:
                     send_discord(
                         f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                         f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
@@ -1887,6 +1887,14 @@ async def main():
     dbg("rpc enabled:", bool(SOLANA_RPC_URL))
     dbg("pumpportal api key enabled:", bool(PUMPPORTAL_API_KEY))
 
+    send_discord(
+    f"🟦 BOT STARTED — smart wallets {len(SMART_WALLETS)} — "
+    f"alpha wallets {len(STATE.get('alpha_discovered_wallets', []))} — "
+    f"x100 wallets {len(STATE.get('x100_discovered_wallets', []))} — "
+    f"rpc enabled {bool(SOLANA_RPC_URL)} — "
+    f"pumpportal key enabled {bool(PUMPPORTAL_API_KEY)}"
+    )
+    
     await asyncio.gather(
         websocket_loop(),
         gecko_new_pools_loop(),
