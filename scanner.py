@@ -63,13 +63,13 @@ MAX_BUY_ALERTS_PER_WINDOW = 2
 # extreme mode
 MAX_DISCOVERY_MC = 5_000_000
 MIN_LIQUIDITY = 800
-MIN_LIQ_TO_MC_RATIO = 0.18
+MIN_LIQ_TO_MC_RATIO = 0.10
 WASH_RATIO_LIMIT = 45.0
 NO_CHASE_MULTIPLIER = 2.2
 MAX_TRACKED_TOKENS = 700
 GECKO_MAX_ADD_PER_CYCLE = 150
 
-GOLD_SCORE = 5
+GOLD_SCORE = 4
 SHORTLIST_SCORE = 3
 
 MIN_GOLD_MC = 8_000
@@ -1490,7 +1490,7 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
 
     if (
         has_real_action_signal(token_state, pair, holder_stats)
-        and live_confirmation_count(pair, token_state, holder_stats) >= 3
+        and live_confirmation_count(pair, token_state, holder_stats) >= 2
         and score >= GOLD_SCORE
     ):
         return "GOLD"
@@ -1606,7 +1606,36 @@ def evaluate_token(mint: str) -> None:
     score = compute_score(pair, token_state, holder_stats)
 
     alert_type = classify_alert_type(pair, token_state, holder_stats, score, hard_red)
+    
+    if alert_type == "IGNORE" and qualifies_shortlist(pair, token_state, holder_stats, score, hard_red):
+    alert_key = f"SHORTLIST:{mint}"
+    
+    if not recently_alerted(alert_key):
+        name = token_state.get("name") or mint[:6]
+        source = token_state.get("source", "unknown")
+        dex_url = pair.get("url") or f"https://dexscreener.com/solana/{mint}"
+        reasons = shortlist_reasons(token_state, pair, holder_stats)
 
+        send_discord(
+            f"🔵 SHORTLIST | {name}\n"
+            f"Score: {score}/10\n"
+            f"Market cap: ${compact_k(mc)}\n"
+            f"Liquidity: ${compact_k(liq)}\n"
+            f"Reason: {', '.join(reasons)}\n"
+            f"Dex: <{dex_url}>"
+        )
+        mark_alerted(alert_key)
+
+        with SHORTLIST_LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                now_ts(), mint, name, score, round(mc, 2), round(liq, 2),
+                source,
+                reasons[0] if len(reasons) > 0 else "",
+                reasons[1] if len(reasons) > 1 else "",
+                reasons[2] if len(reasons) > 2 else "",
+                dex_url
+            ])
+    return
     if alert_type == "IGNORE":
         STATE["cycle_deep_rejected"] += 1
         return
@@ -1675,7 +1704,7 @@ def discovery_accepts_pair(pair: Optional[dict]) -> bool:
     if mc <= 0 or mc > MAX_DISCOVERY_MC:
         return False
     if liq < MIN_LIQUIDITY:
-        return False
+    #   return False
     if fake_liquidity_risk(mc, liq):
         return False
     return True
