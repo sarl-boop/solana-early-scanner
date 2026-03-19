@@ -1481,9 +1481,9 @@ def classify_alert_type(pair: dict, token_state: dict, holder_stats: dict, score
     if hard_red:
         return "RED" if token_state["mint"] in HELD_TOKENS else "IGNORE"
 
-    if liq_tier == "weak":
+    if liq_tier == "weak" and mc > 120000:
         return "IGNORE"
-    if not (MIN_GOLD_MC <= mc <= MAX_GOLD_MC):
+    if not (5000 <= mc <= 300000):
         return "IGNORE"
     if not can_send_buy_alert():
         return "IGNORE"
@@ -1586,7 +1586,7 @@ def evaluate_token(mint: str) -> None:
     if liq < MIN_LIQUIDITY:
         STATE["cycle_deep_rejected"] += 1
         return
-    if age_min < 1:
+    if age_min < 0.2:
         STATE["cycle_deep_rejected"] += 1
         return
 
@@ -1599,8 +1599,8 @@ def evaluate_token(mint: str) -> None:
         or dev_supply_proxy_risk(token_state)
         or token_state.get("dev_sold", False)
         or token_state.get("lp_risk", False)
-        or not token_state.get("tradeability_ok", True)
-        or not token_state.get("risk_ok", True)
+        # or not token_state.get("tradeability_ok", True)
+        # or not token_state.get("risk_ok", True)
     )
 
     score = compute_score(pair, token_state, holder_stats)
