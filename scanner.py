@@ -1855,7 +1855,7 @@ async def heartbeat_loop():
                     continue
                 LAST_HEARTBEAT_TS = time.time()
             
-                if raw_seen >= 200 or tracked >= 20:
+                if raw_seen >= 500 or tracked >= 50:
                     send_discord(
                         f"🤖 SCANNER ACTIVE — raw_seen {raw_seen} — discovery_rejected {discovery_rejected} — "
                         f"tracked {tracked} — tracked_added {tracked_added} — evaluated {evaluated} — "
