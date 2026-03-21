@@ -54,7 +54,7 @@ GECKO_REFRESH_SECONDS = 25
 PAPER_CHECK_INTERVAL_SECONDS = 300
 
 # retention
-TOKEN_TTL_SECONDS = 3 * 3600
+TOKEN_TTL_SECONDS = 45 * 60
 ALERT_COOLDOWN_SECONDS = 8 * 3600
 SHORTLIST_COOLDOWN_SECONDS = 3 * 3600
 BUY_ALERT_WINDOW_SECONDS = 20 * 60
@@ -62,11 +62,11 @@ MAX_BUY_ALERTS_PER_WINDOW = 2
 
 # mode
 MAX_DISCOVERY_MC = 5_000_000
-MIN_LIQUIDITY = 800
+MIN_LIQUIDITY = 500
 MIN_LIQ_TO_MC_RATIO = 0.10
 WASH_RATIO_LIMIT = 45.0
 NO_CHASE_MULTIPLIER = 2.2
-MAX_TRACKED_TOKENS = 700
+MAX_TRACKED_TOKENS = 180
 GECKO_MAX_ADD_PER_CYCLE = 150
 
 GOLD_SCORE = 4
@@ -242,10 +242,13 @@ def cleanup_state() -> None:
             keep_alerted[key] = ts
     STATE["alerted"] = keep_alerted
 
-    keep_tokens = {}
-    for mint, rec in STATE.get("tokens", {}).items():
-        if now - int(rec.get("last_seen_ts", 0)) < TOKEN_TTL_SECONDS:
-            keep_tokens[mint] = rec
+    keforep_tokens = {}
+    tokens = list(STATE.get("tokens", {}).items())
+    tokens.sort(key=lambda kv: int(kv[1].get("last_seen_ts", 0)), reverse=True)
+
+    for mint, rec in tokens[:120]:
+        if now_ts() - int(rec.get("last_seen_ts", 0)) <= 20 * 60:
+            evaluate_token(mint)
 
     ordered = sorted(
         keep_tokens.items(),
