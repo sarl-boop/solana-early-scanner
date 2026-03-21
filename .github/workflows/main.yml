@@ -3,22 +3,21 @@ name: Solana Sniper Scanner Extreme
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # toutes les 6h (stable)
+    - cron: "0 */6 * * *"
 
 concurrency:
   group: solana-sniper-bot
-  cancel-in-progress: true  # le plus récent remplace l'ancien (comme tu voulais)
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # légèrement < 6h pour éviter coupure brutale
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ✅ RESTORE STATE (mémoire bot)
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
@@ -35,7 +34,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests websockets
 
-      # ✅ RUN BOT
       - name: Run scanner
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -49,7 +47,6 @@ jobs:
         run: |
           python scanner.py
 
-      # ✅ SAVE STATE (apprentissage wallets etc.)
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
