@@ -243,8 +243,6 @@ def cleanup_state() -> None:
     STATE["alerted"] = keep_alerted
 
     keep_tokens = {}
-    tokens = list(STATE.get("tokens", {}).items())
-    tokens.sort(key=lambda kv: int(kv[1].get("last_seen_ts", 0)), reverse=True)
 
     for mint, rec in tokens[:120]:
         if now_ts() - int(rec.get("last_seen_ts", 0)) <= 20 * 60:
