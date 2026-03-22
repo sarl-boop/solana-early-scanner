@@ -244,9 +244,9 @@ def cleanup_state() -> None:
 
     keep_tokens = {}
 
-    for mint, rec in tokens[:120]:
-        if now_ts() - int(rec.get("last_seen_ts", 0)) <= 20 * 60:
-            evaluate_token(mint)
+    for mint, rec in STATE.get("tokens",{}).items():
+        if now_ts() - int(rec.get("last_seen_ts", 0)) < TOTKEN_TTL_SECONDS:
+            keep_tokens[mint] = rec
 
     ordered = sorted(
         keep_tokens.items(),
