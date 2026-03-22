@@ -242,7 +242,7 @@ def cleanup_state() -> None:
             keep_alerted[key] = ts
     STATE["alerted"] = keep_alerted
 
-    keforep_tokens = {}
+    keep_tokens = {}
     tokens = list(STATE.get("tokens", {}).items())
     tokens.sort(key=lambda kv: int(kv[1].get("last_seen_ts", 0)), reverse=True)
 
